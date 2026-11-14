@@ -167,6 +167,7 @@ def _search(
     must_conditions: list[FieldCondition],
     should_conditions: list[FieldCondition] | None = None,
     top_k: int = TOP_K,
+    score_threshold: float | None = None,
     tool_name: str = "search",
 ) -> list[dict[str, Any]]:
     """Run a Qdrant search with the supplied filter conditions and latency tracking."""
@@ -174,16 +175,20 @@ def _search(
     if should_conditions:
         filter_kwargs["should"] = should_conditions
 
+    query_kwargs: dict[str, Any] = {
+        "collection_name": COLLECTION_NAME,
+        "query": query_vector,
+        "query_filter": Filter(**filter_kwargs),
+        "limit": top_k,
+        "search_params": SearchParams(exact=False, hnsw_ef=128),
+        "with_payload": True,
+    }
+    if score_threshold is not None:
+        query_kwargs["score_threshold"] = score_threshold
+
     try:
         with QDRANT_QUERY_DURATION_SECONDS.labels(tool_name=tool_name).time():
-            response = _qdrant.query_points(
-                collection_name=COLLECTION_NAME,
-                query=query_vector,
-                query_filter=Filter(**filter_kwargs),
-                limit=top_k,
-                search_params=SearchParams(exact=False, hnsw_ef=128),
-                with_payload=True,
-            )
+            response = _qdrant.query_points(**query_kwargs)
     except Exception as exc:
         logger.warning(
             "Qdrant query failed (collection '%s' may not exist or is empty): %s",
@@ -231,17 +236,32 @@ def _format_results(results: list[dict[str, Any]]) -> str:
 
 @mcp.tool()
 @track_tool("get_epic_planning_context")
-def get_epic_planning_context(topic: str, repo_name: str) -> str:
+def get_epic_planning_context(
+    topic: str,
+    repo_name: str,
+    include_code_fallback: bool = True,
+) -> str:
     """Retrieve PRDs, architecture docs, and ADRs to help the planning agent
     break down an epic into issues.
+
+    If documentation is sparse (fewer than 3 results) or absent, and
+    *include_code_fallback* is True, it automatically supplements or falls back
+    to core implementation code (classes and functions) to provide ground truth reality.
 
     Args:
         topic: The epic topic or feature area to search for.
         repo_name: The repository to scope the search to.
+        include_code_fallback: Automatically retrieve relevant code AST entities
+            when documentation is insufficient. Defaults to True.
     """
-    logger.info("get_epic_planning_context(topic=%r, repo=%r)", topic, repo_name)
+    logger.info(
+        "get_epic_planning_context(topic=%r, repo=%r, code_fallback=%s)",
+        topic,
+        repo_name,
+        include_code_fallback,
+    )
     vec = _embed(topic)
-    results = _search(
+    doc_results = _search(
         query_vector=vec,
         must_conditions=[
             FieldCondition(key="repo_name", match=MatchValue(value=repo_name)),
@@ -249,9 +269,40 @@ def get_epic_planning_context(topic: str, repo_name: str) -> str:
                 key="document_type", match=MatchValue(value="business_logic")
             ),
         ],
+        score_threshold=0.25,
         tool_name="get_epic_planning_context",
     )
-    return _format_results(results)
+
+    code_results: list[dict[str, Any]] = []
+    if len(doc_results) < 3 and include_code_fallback:
+        code_results = _search(
+            query_vector=vec,
+            must_conditions=[
+                FieldCondition(key="repo_name", match=MatchValue(value=repo_name)),
+                FieldCondition(key="document_type", match=MatchValue(value="code")),
+            ],
+            top_k=5,
+            score_threshold=0.25,
+            tool_name="get_epic_planning_context_code_fallback",
+        )
+
+    if not doc_results and not code_results:
+        return "No relevant results found."
+
+    parts: list[str] = []
+    if doc_results:
+        if code_results:
+            parts.append("=== 📄 Architectural Documentation (Design Intent) ===")
+        parts.append(_format_results(doc_results))
+
+    if code_results:
+        if doc_results:
+            parts.append("=== 💻 Codebase Reality (Ground Truth ASTs — Sparse Docs Detected) ===")
+        else:
+            parts.append("=== 💻 Codebase Reality (Ground Truth ASTs — No Documentation Found) ===")
+        parts.append(_format_results(code_results))
+
+    return "\n\n".join(parts)
 
 
 # ── Tool 2: Implementation AST ────────────────────────────────────────────
