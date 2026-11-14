@@ -22,10 +22,12 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
+    Distance,
     FieldCondition,
     Filter,
     MatchValue,
     SearchParams,
+    VectorParams,
 )
 from sentence_transformers import SentenceTransformer
 from starlette.applications import Starlette
@@ -72,6 +74,23 @@ if QDRANT_URL:
 else:
     logger.info("Connecting to Qdrant at %s:%s …", QDRANT_HOST, QDRANT_PORT)
     _qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, api_key=QDRANT_API_KEY)
+
+
+def ensure_collection(client: QdrantClient, collection_name: str = COLLECTION_NAME) -> None:
+    """Ensure the target Qdrant collection exists before queries run."""
+    try:
+        collections = [c.name for c in client.get_collections().collections]
+        if collection_name not in collections:
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(size=384, distance=Distance.COSINE),
+            )
+            logger.info("Created collection '%s'.", collection_name)
+    except Exception as exc:
+        logger.warning("Could not auto-create collection '%s': %s", collection_name, exc)
+
+
+ensure_collection(_qdrant, COLLECTION_NAME)
 
 # ---------------------------------------------------------------------------
 # FastMCP application with Telemetry
@@ -126,15 +145,24 @@ def _search(
     if should_conditions:
         filter_kwargs["should"] = should_conditions
 
-    with QDRANT_QUERY_DURATION_SECONDS.labels(tool_name=tool_name).time():
-        response = _qdrant.query_points(
-            collection_name=COLLECTION_NAME,
-            query=query_vector,
-            query_filter=Filter(**filter_kwargs),
-            limit=top_k,
-            search_params=SearchParams(exact=False, hnsw_ef=128),
-            with_payload=True,
+    try:
+        with QDRANT_QUERY_DURATION_SECONDS.labels(tool_name=tool_name).time():
+            response = _qdrant.query_points(
+                collection_name=COLLECTION_NAME,
+                query=query_vector,
+                query_filter=Filter(**filter_kwargs),
+                limit=top_k,
+                search_params=SearchParams(exact=False, hnsw_ef=128),
+                with_payload=True,
+            )
+    except Exception as exc:
+        logger.warning(
+            "Qdrant query failed (collection '%s' may not exist or is empty): %s",
+            COLLECTION_NAME,
+            exc,
         )
+        QDRANT_RESULTS_RETURNED.labels(tool_name=tool_name).observe(0)
+        return []
 
     results = [
         {
