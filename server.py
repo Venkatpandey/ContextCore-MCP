@@ -66,17 +66,31 @@ TOP_K = 10
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+QDRANT_GRPC_PORT = int(os.getenv("QDRANT_GRPC_PORT", "6334"))
+QDRANT_PREFER_GRPC = os.getenv("QDRANT_PREFER_GRPC", "false").lower() in ("true", "1", "yes")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
 logger.info("Loading embedding model (all-MiniLM-L6-v2) …")
 _model = SentenceTransformer("all-MiniLM-L6-v2")
 
 if QDRANT_URL:
-    logger.info("Connecting to Qdrant at %s …", QDRANT_URL)
-    _qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+    logger.info("Connecting to Qdrant at %s (prefer_grpc=%s) …", QDRANT_URL, QDRANT_PREFER_GRPC)
+    _qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, prefer_grpc=QDRANT_PREFER_GRPC)
 else:
-    logger.info("Connecting to Qdrant at %s:%s …", QDRANT_HOST, QDRANT_PORT)
-    _qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, api_key=QDRANT_API_KEY)
+    logger.info(
+        "Connecting to Qdrant at %s:%s (grpc_port=%s, prefer_grpc=%s) …",
+        QDRANT_HOST,
+        QDRANT_PORT,
+        QDRANT_GRPC_PORT,
+        QDRANT_PREFER_GRPC,
+    )
+    _qdrant = QdrantClient(
+        host=QDRANT_HOST,
+        port=QDRANT_PORT,
+        grpc_port=QDRANT_GRPC_PORT,
+        prefer_grpc=QDRANT_PREFER_GRPC,
+        api_key=QDRANT_API_KEY,
+    )
 
 
 def ensure_collection(client: QdrantClient, collection_name: str = COLLECTION_NAME) -> None:
