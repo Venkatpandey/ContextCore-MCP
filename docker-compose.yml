@@ -15,6 +15,7 @@ services:
     restart: unless-stopped
 
   mcp_server:
+    image: ghcr.io/venkatpandey/contextcore-mcp:latest
     build:
       context: .
       dockerfile: Dockerfile

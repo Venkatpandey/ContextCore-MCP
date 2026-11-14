@@ -62,100 +62,101 @@ uv run python ingest.py /path/to/your/repo --repo-name my-service --domain-conte
 # 5. Connect your AI agent to http://localhost:8000/sse
 ```
 
-## Propr Integration Example
+## AI Agent Integrations
 
-ContextCore-MCP integrates directly with [**ProPR** (`integry/propr`)](https://github.com/integry/propr) — the open-source platform that turns GitHub issues into tested, production-ready Pull Requests using AI coding agents running in isolated Docker worktrees.
+ContextCore-MCP connects with any MCP-compatible AI agent or IDE over **SSE** (`http://localhost:8000/sse`) or **Stdio** (`uv run python server.py --transport stdio`).
 
-ContextCore-MCP serves as ProPR's semantic memory and AST retrieval backbone:
+### 1. Claude (Claude Desktop & Claude Code)
 
-```
-┌────────────────────────────────┐
-│   GitHub Issue / PR Created    │
-└───────────────┬────────────────┘
-                ▼
-┌────────────────────────────────┐
-│       ProPR Orchestrator       │
-│  (https://github.com/integry/  │
-│              propr)            │
-└───────┬────────────────┬───────┘
-        │                │
-        │ FastMCP (SSE)  │
-        ▼                ▼
-┌────────────────────────────────┐
-│        ContextCore-MCP         │
-│  • get_epic_planning_context   │
-│  • get_implementation_ast      │
-│  • get_testing_context         │
-│  • get_code_review_guidelines  │
-│  • get_deployment_infrastr.    │
-└───────────────┬────────────────┘
-                ▼
-┌────────────────────────────────┐
-│   Qdrant Knowledge Base        │
-│   (384-d Cosine Vectors)       │
-└────────────────────────────────┘
+Add to your `claude_desktop_config.json` (or project `.claude.json`):
+
+```json
+{
+  "mcpServers": {
+    "contextcore": {
+      "url": "http://localhost:8000/sse"
+    }
+  }
+}
 ```
 
-### Step 1 — Ingest the ProPR Codebase & Documentation
+Or via Stdio:
+```json
+{
+  "mcpServers": {
+    "contextcore": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/ContextCore-MCP", "python", "server.py", "--transport", "stdio"],
+      "env": {
+        "QDRANT_HOST": "localhost",
+        "QDRANT_PORT": "6333"
+      }
+    }
+  }
+}
+```
 
-Clone and ingest `integry/propr` (or any target repository) into your local or cloud Qdrant instance:
+**Example Prompt:**
+> *"Find the class and method AST implementations responsible for user authentication in the `auth-service` repo using ContextCore."*
+> → Claude automatically calls `get_implementation_ast(issue_description="user authentication handlers", repo_name="auth-service")`.
+
+### 2. OpenAI Codex / Cursor / Antigravity
+
+In **Cursor** (`.cursor/mcp.json`) or **Antigravity** (`~/.gemini/config/mcp_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "contextcore": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/ContextCore-MCP", "python", "server.py", "--transport", "stdio"],
+      "env": {
+        "QDRANT_HOST": "localhost",
+        "QDRANT_PORT": "6333"
+      }
+    }
+  }
+}
+```
+
+**Example Prompt:**
+> *"Review this diff against our project guidelines and ADRs using ContextCore."*
+> → Codex/Cursor calls `get_code_review_guidelines(code_diff="...", repo_name="core-service")`.
+
+### 3. Autonomous Agents (e.g. ProPR)
+
+ContextCore-MCP integrates cleanly with autonomous agents like [**ProPR** (`integry/propr`)](https://github.com/integry/propr) to power end-to-end issue-to-PR workflows:
 
 ```bash
-# Clone integry/propr
-git clone https://github.com/integry/propr.git /tmp/propr
-
-# Ingest with domain-context set to agent-orchestration
-uv run python ingest.py /tmp/propr \
-    --repo-name propr \
-    --domain-context agent-orchestration
+# Ingest any target codebase into ContextCore
+uv run python ingest.py /path/to/target-repo --repo-name propr --domain-context agent-orchestration
 ```
 
-### Step 2 — SDLC Agent Invocations in ProPR Workflows
+When an autonomous agent resolves an issue, it queries the 5 SDLC tools:
+- `get_epic_planning_context`: Queries PRDs and ADRs for architectural context.
+- `get_implementation_ast`: Locates specific classes, functions, and interfaces.
+- `get_testing_context`: Retrieves matching test conventions and fixtures.
+- `get_code_review_guidelines`: Verifies proposed patches against repo rules.
+- `get_deployment_infrastructure`: Retrieves Dockerfiles and CI definitions.
 
-When ProPR processes an issue, its agents query ContextCore-MCP across each step of the pipeline:
+---
 
-**1. Planning & Task Breakdown Agent** (`get_epic_planning_context`):
-```
-Tool:  get_epic_planning_context
-Args:  topic="docker sandbox isolation and git worktree management", repo_name="propr"
+## Universal Docker & Cloud Deployment
 
-→ Returns architecture decision records (ADRs), execution environment PRDs,
-  and container security policies.
-```
+ContextCore-MCP is packaged with standard **Docker** and **Docker Compose** configurations, allowing you to deploy it on any cloud platform or orchestrator of your choice:
 
-**2. Implementation / Coding Agent** (`get_implementation_ast`):
-```
-Tool:  get_implementation_ast
-Args:  issue_description="Add support for custom subagent execution timeout", repo_name="propr"
+- **Any VM / VPS** (AWS EC2, GCP Compute Engine, DigitalOcean, Hetzner):
+  ```bash
+  docker compose up -d
+  ```
+- **Managed Container Platforms** (AWS ECS / App Runner, GCP Cloud Run, Azure Container Apps, Railway, Fly.io):
+  - FastMCP runs from the root [`Dockerfile`](Dockerfile) exposing port `8000`.
+  - Qdrant runs from the official `qdrant/qdrant:latest` image with a persistent volume mounted at `/qdrant/storage`.
 
-→ Returns the exact AST nodes for Runner execution classes, Task timeout handlers,
-  and worker dispatch loops.
-```
-
-**3. Test Generation Agent** (`get_testing_context`):
-```
-Tool:  get_testing_context
-Args:  modified_code="async def execute_task_with_timeout(self, task: Task, timeout: int)...", repo_name="propr"
-
-→ Returns existing pytest/asyncio test patterns, fixture definitions, and the
-  original unmodified execution engine source.
-```
-
-**4. Pull Request Review Agent** (`get_code_review_guidelines`):
-```
-Tool:  get_code_review_guidelines
-Args:  code_diff="+ async def execute_task_with_timeout(...", repo_name="propr"
-
-→ Returns PR contribution standards, linting guidelines, and error-handling requirements.
-```
-
-**5. Sandboxed Runtime & CI Agent** (`get_deployment_infrastructure`):
-```
-Tool:  get_deployment_infrastructure
-Args:  target_service="agent-runner", repo_name="propr"
-
-→ Returns Dockerfile specifications, docker-compose configurations, and CI/CD workflows.
-```
+### AWS CDK Reference Example
+For teams deploying to AWS, an infrastructure-as-code reference implementation using **AWS ECS Fargate**, **Amazon EFS** (for persistent vector storage), and an **Application Load Balancer** is provided:
+- 📁 **CDK Code**: [`examples/aws-cdk/`](examples/aws-cdk/)
+- 📖 **Deployment Guide**: [`docs/aws-deployment-guide.md`](docs/aws-deployment-guide.md)
 
 ---
 
