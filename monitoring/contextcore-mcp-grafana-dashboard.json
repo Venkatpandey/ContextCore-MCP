@@ -1,86 +1,174 @@
 {
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Select your existing Prometheus data source",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__elements": {},
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "9.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    }
+  ],
   "annotations": { "list": [] },
   "editable": true,
   "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
+  "graphTooltip": 1,
   "id": null,
   "links": [],
   "liveNow": false,
   "panels": [
     {
-      "title": "MCP Tool Invocations (Rate/sec)",
+      "id": 1,
+      "title": "MCP Tool Invocations Rate (/sec)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "sum by (tool_name, status) (rate(mcp_tool_calls_total[1m]))",
-          "legendFormat": "{{tool_name}} ({{status}})"
+          "legendFormat": "{{tool_name}} [{{status}}]"
         }
       ]
     },
     {
+      "id": 2,
       "title": "Tool Execution Latency (p95 seconds)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "histogram_quantile(0.95, sum by (le, tool_name) (rate(mcp_tool_duration_seconds_bucket[1m])))",
           "legendFormat": "p95 {{tool_name}}"
         }
       ]
     },
     {
+      "id": 3,
       "title": "Qdrant Total Vectors Stored",
       "type": "stat",
       "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "collections_vector_total",
           "legendFormat": "Total Vectors"
         }
       ]
     },
     {
+      "id": 4,
       "title": "Qdrant CPU Cores Used",
       "type": "gauge",
       "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "cpu_cores_used",
           "legendFormat": "Cores"
         }
       ]
     },
     {
+      "id": 5,
       "title": "Embedding Latency (p95 seconds)",
       "type": "timeseries",
       "gridPos": { "h": 6, "w": 12, "x": 12, "y": 8 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "histogram_quantile(0.95, sum by (le) (rate(mcp_embedding_duration_seconds_bucket[1m])))",
           "legendFormat": "p95 Embedding Latency"
         }
       ]
     },
     {
+      "id": 6,
       "title": "Ingested Chunks by Document Type",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "sum by (document_type) (mcp_ingest_chunks_total)",
           "legendFormat": "{{document_type}}"
         }
       ]
     },
     {
-      "title": "Qdrant Query Latency (p95 seconds)",
+      "id": 7,
+      "title": "Qdrant Query Retrieval Latency (p95 seconds)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "histogram_quantile(0.95, sum by (le, tool_name) (rate(mcp_qdrant_query_duration_seconds_bucket[1m])))",
-          "legendFormat": "{{tool_name}}"
+          "legendFormat": "p95 {{tool_name}}"
         }
       ]
     }
@@ -88,7 +176,7 @@
   "refresh": "5s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": ["contextcore", "mcp", "qdrant"],
+  "tags": ["contextcore", "mcp", "qdrant", "sdlc"],
   "time": { "from": "now-15m", "to": "now" },
   "timepicker": {},
   "timezone": "browser",

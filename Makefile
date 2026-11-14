@@ -1,4 +1,4 @@
-.PHONY: up down logs restart test ingest clean build status sync observability-up observability-down
+.PHONY: up down logs restart test ingest clean build status sync
 
 # ---------------------------------------------------------------------------
 # Dependency Management (uv)
@@ -7,7 +7,7 @@ sync:
 	uv sync
 
 # ---------------------------------------------------------------------------
-# Infrastructure (Core)
+# Infrastructure
 # ---------------------------------------------------------------------------
 up:
 	docker compose up -d
@@ -16,31 +16,16 @@ build:
 	docker compose build --no-cache
 
 down:
-	docker compose --profile observability down
+	docker compose down
 
 restart: down up
 
 logs:
 	docker compose logs -f
 
-# ---------------------------------------------------------------------------
-# Telemetry & Observability (Prometheus + Grafana)
-# ---------------------------------------------------------------------------
-observability-up:
-	docker compose --profile observability up -d
-	@echo ""
-	@echo "📊 Observability stack is ready:"
-	@echo "  - Prometheus : http://localhost:9090"
-	@echo "  - Grafana    : http://localhost:3000 (admin / admin)"
-	@echo "  - MCP Metrics: http://localhost:8000/metrics"
-	@echo "  - Qdrant     : http://localhost:6333/metrics"
-
-observability-down:
-	docker compose --profile observability down
-
 status:
 	@echo "── Containers ──"
-	@docker compose --profile observability ps
+	@docker compose ps
 	@echo ""
 	@echo "── Qdrant health ──"
 	@curl -sf http://localhost:6333/healthz && echo " OK" || echo " UNREACHABLE"
@@ -48,7 +33,7 @@ status:
 	@echo "── MCP server health ──"
 	@curl -sf http://localhost:8000/healthz && echo " OK" || echo " UNREACHABLE"
 	@echo ""
-	@echo "── MCP Prometheus metrics ──"
+	@echo "── MCP Prometheus metrics endpoint ──"
 	@curl -sf http://localhost:8000/metrics | head -n 5 || echo " UNREACHABLE"
 
 # ---------------------------------------------------------------------------
@@ -75,5 +60,5 @@ test: up
 # Cleanup
 # ---------------------------------------------------------------------------
 clean: down
-	docker volume rm -f qudrant-mcp_qdrant_storage qudrant-mcp_huggingface_cache qudrant-mcp_prometheus_data qudrant-mcp_grafana_data 2>/dev/null || true
+	docker volume rm -f qudrant-mcp_qdrant_storage qudrant-mcp_huggingface_cache 2>/dev/null || true
 	@echo "Cleaned ✅"

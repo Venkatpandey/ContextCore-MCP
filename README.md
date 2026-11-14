@@ -211,44 +211,42 @@ uv run pytest -v
 - Qdrant filter logic (must, should/OR)
 - MCP tool search helpers + result formatting
 
-## Observability & Telemetry (Prometheus & Grafana)
+## Observability & Telemetry (Pluggable Prometheus & Grafana)
 
-ContextCore-MCP comes with built-in Prometheus instrumentation and a pre-configured Grafana dashboard for full-stack SDLC and infrastructure observability.
+ContextCore-MCP is designed to be completely **pluggable** with your existing monitoring infrastructure. It does not bundle a dedicated Grafana server; instead, it exposes standard Prometheus metrics and provides a ready-to-import Grafana dashboard.
 
-### Architecture
+### 1. Attaching an Existing Prometheus
 
-```
-                      ┌──────────────────────┐
-                      │   Grafana (:3000)    │
-                      └──────────┬───────────┘
-                                 │ PromQL
-                      ┌──────────▼───────────┐
-                      │  Prometheus (:9090)  │
-                      └────┬────────────┬────┘
-           Scrape :8000/metrics    Scrape :6333/metrics
-                           │            │
-             ┌─────────────▼────┐  ┌────▼─────────────┐
-             │  FastMCP Server  │  │ Qdrant Vector DB │
-             └──────────────────┘  └──────────────────┘
-```
+Add the scrape jobs from [`monitoring/prometheus-scrape-example.yml`](monitoring/prometheus-scrape-example.yml) to your existing `prometheus.yml`:
 
-### Starting the Observability Stack
+```yaml
+scrape_configs:
+  # FastMCP server metrics (tool invocations, latency, embeddings)
+  - job_name: "contextcore-mcp"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["localhost:8000"]
+        labels:
+          service: "contextcore-mcp"
 
-```bash
-# Start Qdrant, FastMCP, Prometheus, and Grafana
-make observability-up
-
-# Or via docker compose directly:
-docker compose --profile observability up -d
+  # Qdrant native vector database metrics (vector count, CPU, memory)
+  - job_name: "qdrant"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["localhost:6333"]
+        labels:
+          service: "qdrant"
 ```
 
-| Service | Port | Endpoint | Credentials / Purpose |
-|---------|------|----------|-----------------------|
-| **FastMCP Metrics** | `8000` | `http://localhost:8000/metrics` | Prometheus text metrics |
-| **FastMCP Health** | `8000` | `http://localhost:8000/healthz` | HTTP 200 healthcheck |
-| **Qdrant Metrics** | `6333` | `http://localhost:6333/metrics` | Native Qdrant metrics |
-| **Prometheus** | `9090` | `http://localhost:9090` | Scraper & time-series DB |
-| **Grafana** | `3000` | `http://localhost:3000` | `admin` / `admin` (pre-provisioned dashboard) |
+### 2. Importing the Grafana Dashboard
+
+A pre-built, production dashboard is provided at [`monitoring/contextcore-mcp-grafana-dashboard.json`](monitoring/contextcore-mcp-grafana-dashboard.json).
+
+To import it into any existing Grafana instance:
+1. In Grafana, navigate to **Dashboards** → **New** → **Import**.
+2. Click **Upload dashboard JSON file** and select `monitoring/contextcore-mcp-grafana-dashboard.json` (or paste the JSON content).
+3. Select your existing **Prometheus** data source from the dropdown when prompted (`${DS_PROMETHEUS}`).
+4. Click **Import**.
 
 ### Key Exported Metrics
 
@@ -268,7 +266,9 @@ docker compose --profile observability up -d
 
 ## Supported Languages
 
-The Tree-sitter parser handles: **Python**, **TypeScript**, **TSX**, **JavaScript**, **JSX**, **Go**, **Rust**, **Java**.
+The Tree-sitter parser handles: **Python**, **TypeScript**, **TSX**, **JavaScript**, **JSX**, **Go**, **Rust**, **Java**, and **Scala** (`.scala`, `.sc`).
+
+Extend by adding entries to `TS_LANGUAGE_MAP` and `ENTITY_NODE_TYPES` in [`ingest.py`](ingest.py).
 
 Extend by adding entries to `TS_LANGUAGE_MAP` and `ENTITY_NODE_TYPES` in [`ingest.py`](ingest.py).
 

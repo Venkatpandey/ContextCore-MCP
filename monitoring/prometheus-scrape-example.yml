@@ -1,0 +1,22 @@
+# ---------------------------------------------------------------------------
+# ContextCore-MCP — Prometheus Scrape Configuration Example
+# ---------------------------------------------------------------------------
+# Add the following job blocks to your existing prometheus.yml under scrape_configs:
+
+scrape_configs:
+  # 1. FastMCP Server Metrics (Tool calls, p95 durations, embedding times)
+  - job_name: "contextcore-mcp"
+    metrics_path: "/metrics"
+    static_configs:
+      # If running on the same host, replace with localhost:8000 or your container DNS name
+      - targets: ["localhost:8000"]
+        labels:
+          service: "contextcore-mcp"
+
+  # 2. Qdrant Native Vector DB Metrics (Vectors count, CPU, memory, collections)
+  - job_name: "qdrant"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["localhost:6333"]
+        labels:
+          service: "qdrant"

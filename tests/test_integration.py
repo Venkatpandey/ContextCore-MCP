@@ -106,6 +106,31 @@ export class Server {
         )
         assert all(c.document_type == "test_code" for c in chunks)
 
+    def test_scala_classes_objects_traits(self):
+        source = '''package com.propr.services
+
+trait TenantRepository {
+  def findById(id: String): Option[Tenant]
+}
+
+case class Tenant(id: String, name: String)
+
+object TenantService {
+  def processTenant(t: Tenant): Boolean = true
+}
+
+def calculateTax(amount: Double): Double = amount * 0.2
+'''
+        chunks = _chunk_code_with_ast(
+            source, "scala", Path("src/TenantService.scala"), "test-repo", "general"
+        )
+        names = {c.entity_name for c in chunks}
+        assert "TenantRepository" in names
+        assert "Tenant" in names
+        assert "TenantService" in names
+        assert "calculateTax" in names
+        assert all(c.document_type == "code" for c in chunks)
+
     def test_empty_source_produces_no_chunks(self):
         chunks = _chunk_code_with_ast(
             "", "python", Path("src/empty.py"), "test-repo", "general"

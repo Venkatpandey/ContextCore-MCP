@@ -69,6 +69,8 @@ TS_LANGUAGE_MAP: dict[str, str] = {
     ".go": "go",
     ".rs": "rust",
     ".java": "java",
+    ".scala": "scala",
+    ".sc": "scala",
 }
 
 # Tree-sitter node types considered "top-level entities" per language.
@@ -118,6 +120,14 @@ ENTITY_NODE_TYPES: dict[str, set[str]] = {
         "interface_declaration",
         "method_declaration",
         "enum_declaration",
+    },
+    "scala": {
+        "class_definition",
+        "trait_definition",
+        "object_definition",
+        "function_definition",
+        "type_definition",
+        "enum_definition",
     },
 }
 
