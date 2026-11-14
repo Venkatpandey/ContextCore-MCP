@@ -303,6 +303,8 @@ To import it into any existing Grafana instance:
 | `mcp_qdrant_query_duration_seconds{tool_name}` | Histogram | Latency of Qdrant vector retrieval |
 | `mcp_qdrant_results_returned{tool_name}` | Histogram | Number of matches returned from Qdrant |
 | `mcp_embedding_duration_seconds` | Histogram | Latency of SentenceTransformers embeddings |
+| `mcp_embedding_cache_hits_total` | Counter | Total query embedding LRU cache hits |
+| `mcp_embedding_cache_misses_total` | Counter | Total query embedding LRU cache misses |
 | `mcp_ingest_chunks_total{repo_name, document_type}` | Counter | Ingested chunks by repository and document type |
 | `mcp_ingest_batch_duration_seconds` | Histogram | Latency of batch upsert operations |
 | `collections_vector_total` | Gauge | Native Qdrant: total vectors across collections |
