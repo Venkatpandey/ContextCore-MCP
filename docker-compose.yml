@@ -28,6 +28,9 @@ services:
       - PYTHONUNBUFFERED=1
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - QDRANT_GRPC_PORT=6334
+      - QDRANT_PREFER_GRPC=true
+      - EMBEDDING_CACHE_SIZE=4096
     depends_on:
       qdrant:
         condition: service_healthy
