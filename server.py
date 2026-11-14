@@ -14,6 +14,7 @@ Each tool:
 from __future__ import annotations
 
 import argparse
+import functools
 import logging
 import os
 import sys
@@ -33,6 +34,8 @@ from sentence_transformers import SentenceTransformer
 from starlette.applications import Starlette
 
 from telemetry import (
+    EMBEDDING_CACHE_HITS_TOTAL,
+    EMBEDDING_CACHE_MISSES_TOTAL,
     EMBEDDING_DURATION_SECONDS,
     QDRANT_QUERY_DURATION_SECONDS,
     QDRANT_RESULTS_RETURNED,
@@ -127,10 +130,22 @@ mcp = InstrumentedFastMCP(
 # ---------------------------------------------------------------------------
 
 
-def _embed(text: str) -> list[float]:
-    """Encode *text* into a 384-d vector with telemetry."""
+@functools.lru_cache(maxsize=int(os.getenv("EMBEDDING_CACHE_SIZE", "2048")))
+def _raw_embed(text: str) -> tuple[float, ...]:
+    """Internal cached embedding function returning an immutable tuple."""
     with EMBEDDING_DURATION_SECONDS.time():
-        return _model.encode(text, show_progress_bar=False).tolist()
+        return tuple(_model.encode(text, show_progress_bar=False).tolist())
+
+
+def _embed(text: str) -> list[float]:
+    """Encode *text* into a 384-d vector with LRU caching and hit/miss telemetry."""
+    hits_before = _raw_embed.cache_info().hits
+    vec = list(_raw_embed(text))
+    if _raw_embed.cache_info().hits > hits_before:
+        EMBEDDING_CACHE_HITS_TOTAL.inc()
+    else:
+        EMBEDDING_CACHE_MISSES_TOTAL.inc()
+    return vec
 
 
 def _search(

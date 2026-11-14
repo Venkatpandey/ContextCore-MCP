@@ -59,6 +59,20 @@ class TestServerTools:
         vec = _embed("hello world")
         assert len(vec) == 384
 
+    def test_embed_lru_caching(self):
+        from server import _raw_embed
+        _raw_embed.cache_clear()
+        
+        # First call is a miss
+        hits_before = _raw_embed.cache_info().hits
+        vec1 = _embed("cache test query string")
+        assert _raw_embed.cache_info().hits == hits_before
+
+        # Second call is a hit
+        vec2 = _embed("cache test query string")
+        assert _raw_embed.cache_info().hits == hits_before + 1
+        assert vec1 == vec2
+
     # ── Tool: get_epic_planning_context ────────────────────────────────
 
     def test_planning_context_finds_prd(self):

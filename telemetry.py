@@ -41,11 +41,21 @@ MCP_TOOL_DURATION_SECONDS = Histogram(
     buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
 )
 
-# Embedding latency
+# Embedding latency and caching
 EMBEDDING_DURATION_SECONDS = Histogram(
     "mcp_embedding_duration_seconds",
     "Time taken to encode text with sentence-transformers",
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0),
+)
+
+EMBEDDING_CACHE_HITS_TOTAL = Counter(
+    "mcp_embedding_cache_hits_total",
+    "Total count of query embedding LRU cache hits",
+)
+
+EMBEDDING_CACHE_MISSES_TOTAL = Counter(
+    "mcp_embedding_cache_misses_total",
+    "Total count of query embedding LRU cache misses",
 )
 
 # Qdrant search latency and result count
