@@ -1,6 +1,20 @@
 # ContextCore-MCP
 
-A local, Dockerized RAG service that ingests multi-repo source code and business documentation into a self-hosted **Qdrant** vector database, and exposes retrieval tools via a **FastMCP** (SSE) server to support AI agents across the entire SDLC.
+<p align="center">
+  <a href="https://github.com/Venkatpandey/ContextCore-MCP/actions/workflows/ci.yml"><img src="https://github.com/Venkatpandey/ContextCore-MCP/actions/workflows/ci.yml/badge.svg" alt="CI Status" /></a>
+  <a href="https://github.com/Venkatpandey/ContextCore-MCP/releases"><img src="https://img.shields.io/github/v/release/Venkatpandey/ContextCore-MCP?logo=github&color=blue" alt="Latest Release" /></a>
+  <a href="https://github.com/Venkatpandey/ContextCore-MCP/pkgs/container/contextcore-mcp"><img src="https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker&logoColor=white" alt="Docker Container" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg?logo=python&logoColor=white" alt="Python 3.11+" /></a>
+  <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-Protocol%202024--11--05-green?logo=anthropic" alt="Model Context Protocol" /></a>
+  <a href="https://qdrant.tech"><img src="https://img.shields.io/badge/Vector%20DB-Qdrant-red?logo=qdrant" alt="Vector DB: Qdrant" /></a>
+</p>
+
+> **Universal Code Intelligence & SDLC RAG Service for AI Agents** — Powered by FastMCP (SSE & Stdio), Qdrant Vector Search, and Tree-sitter AST parsing.
+
+---
+
+A local and cloud-ready **RAG service** that ingests multi-repository source code and business documentation into a self-hosted **Qdrant** vector database, exposing five high-precision retrieval tools via **FastMCP** to supercharge AI coding agents across the entire Software Development Lifecycle (SDLC).
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌──────────────────────┐
