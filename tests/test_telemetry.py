@@ -63,3 +63,23 @@ def test_track_tool_decorator():
 
     assert success_count >= 1
     assert error_count >= 1
+
+
+def test_metrics_endpoint_includes_cache_metrics(client: TestClient):
+    """Verify that LRU cache hits and misses are tracked and exported on /metrics."""
+    from server import _embed, _raw_embed
+
+    _raw_embed.cache_clear()
+    unique_query = "unique integration telemetry query test"
+    
+    # 1. First invocation: Cache Miss
+    _embed(unique_query)
+    
+    # 2. Second invocation: Cache Hit
+    _embed(unique_query)
+    
+    # 3. Verify /metrics output
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    assert "mcp_embedding_cache_hits_total" in response.text
+    assert "mcp_embedding_cache_misses_total" in response.text
