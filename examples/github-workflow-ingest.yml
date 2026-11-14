@@ -1,0 +1,94 @@
+# =============================================================================
+# ContextCore-MCP — Automated Ingestion Workflow Template
+# =============================================================================
+# Place this file in your target repository (e.g. .github/workflows/contextcore-ingest.yml).
+# Whenever changes are merged to `main`, this workflow checks out your repo,
+# parses source code and architecture documents, embeds them, and upserts them
+# to your ContextCore Qdrant vector database.
+#
+# Idempotency:
+# - Each chunk receives a deterministic UUID5 derived from repo, file path, and chunk index.
+# - Re-running ingestion automatically overwrites modified chunks without duplicates.
+#
+# Required GitHub Secrets / Variables:
+# - QDRANT_URL or QDRANT_HOST: Remote URL or hostname of your Qdrant cluster
+# - QDRANT_PORT: Port (default: 6333)
+# - QDRANT_API_KEY: (Optional) API key for authenticated Qdrant Cloud or protected instances
+# - DOMAIN_CONTEXT: (Optional repo variable, e.g. "agent-orchestration", "payments")
+# =============================================================================
+
+name: Ingest Codebase to ContextCore
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # Allows manual one-click trigger from the GitHub Actions UI
+
+jobs:
+  ingest:
+    name: Ingest to Qdrant Knowledge Base
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1 # Shallow checkout is sufficient for AST & doc ingestion
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-hf-sentence-transformers-${{ hashFiles('**/uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-hf-sentence-transformers-
+
+      - name: Clone ContextCore-MCP Ingestion Engine
+        run: |
+          git clone --depth 1 https://github.com/Venkatpandey/ContextCore-MCP.git .contextcore-engine
+          cd .contextcore-engine
+          uv sync --frozen
+
+      - name: Run ContextCore Ingestion
+        env:
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_HOST: ${{ secrets.QDRANT_HOST }}
+          QDRANT_PORT: ${{ secrets.QDRANT_PORT || '6333' }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          COLLECTION_NAME: ${{ secrets.QDRANT_COLLECTION || 'propr_knowledge_base' }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          DOMAIN_CONTEXT: ${{ vars.DOMAIN_CONTEXT || 'engineering' }}
+        run: |
+          cd .contextcore-engine
+          
+          # Assemble command arguments
+          CMD_ARGS=(
+            "../"
+            "--repo-name" "$REPO_NAME"
+            "--domain-context" "$DOMAIN_CONTEXT"
+            "--collection" "$COLLECTION_NAME"
+          )
+          
+          if [ -n "$QDRANT_URL" ]; then
+            CMD_ARGS+=("--qdrant-url" "$QDRANT_URL")
+          elif [ -n "$QDRANT_HOST" ]; then
+            CMD_ARGS+=("--qdrant-host" "$QDRANT_HOST" "--qdrant-port" "$QDRANT_PORT")
+          fi
+          
+          if [ -n "$QDRANT_API_KEY" ]; then
+            CMD_ARGS+=("--qdrant-api-key" "$QDRANT_API_KEY")
+          fi
+          
+          echo "Starting ingestion for repository '$REPO_NAME'..."
+          uv run python ingest.py "${CMD_ARGS[@]}"

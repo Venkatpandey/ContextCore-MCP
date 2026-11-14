@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-COLLECTION_NAME = "propr_knowledge_base"
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "propr_knowledge_base")
 EMBEDDING_DIM = 384
 BATCH_SIZE = 100
 
@@ -496,26 +496,27 @@ def walk_repo(
 # Qdrant helpers
 # ---------------------------------------------------------------------------
 
-def ensure_collection(client: QdrantClient) -> None:
+def ensure_collection(client: QdrantClient, collection_name: str = COLLECTION_NAME) -> None:
     """Create the collection if it doesn't already exist."""
     collections = [c.name for c in client.get_collections().collections]
-    if COLLECTION_NAME in collections:
-        logger.info("Collection '%s' already exists — skipping creation.", COLLECTION_NAME)
+    if collection_name in collections:
+        logger.info("Collection '%s' already exists — skipping creation.", collection_name)
         return
     client.create_collection(
-        collection_name=COLLECTION_NAME,
+        collection_name=collection_name,
         vectors_config=VectorParams(
             size=EMBEDDING_DIM,
             distance=Distance.COSINE,
         ),
     )
-    logger.info("Created collection '%s'.", COLLECTION_NAME)
+    logger.info("Created collection '%s'.", collection_name)
 
 
 def upsert_chunks(
     client: QdrantClient,
     model: SentenceTransformer,
     chunks: list[Chunk],
+    collection_name: str = COLLECTION_NAME,
 ) -> int:
     """Embed and upsert a list of chunks into Qdrant in batches. Returns count."""
     if not chunks:
@@ -536,7 +537,7 @@ def upsert_chunks(
             for chunk, emb in zip(batch, embeddings)
         ]
         with INGEST_BATCH_DURATION_SECONDS.time():
-            client.upsert(collection_name=COLLECTION_NAME, points=points)
+            client.upsert(collection_name=collection_name, points=points)
 
         for chunk in batch:
             INGEST_CHUNKS_TOTAL.labels(
@@ -576,6 +577,18 @@ def main() -> None:
         help="Business domain label (e.g. 'payments', 'identity').",
     )
     parser.add_argument(
+        "--collection",
+        type=str,
+        default=COLLECTION_NAME,
+        help=f"Qdrant collection name (default: '{COLLECTION_NAME}').",
+    )
+    parser.add_argument(
+        "--qdrant-url",
+        type=str,
+        default=os.getenv("QDRANT_URL"),
+        help="Qdrant server full URL (e.g. https://xyz.cloud.qdrant.io:6333). Overrides host/port.",
+    )
+    parser.add_argument(
         "--qdrant-host",
         type=str,
         default=os.getenv("QDRANT_HOST", "localhost"),
@@ -586,6 +599,12 @@ def main() -> None:
         type=int,
         default=int(os.getenv("QDRANT_PORT", "6333")),
         help="Qdrant server port.",
+    )
+    parser.add_argument(
+        "--qdrant-api-key",
+        type=str,
+        default=os.getenv("QDRANT_API_KEY"),
+        help="Qdrant API key for authentication.",
     )
 
     args = parser.parse_args()
@@ -598,9 +617,14 @@ def main() -> None:
     logger.info("Loading embedding model (all-MiniLM-L6-v2) …")
     model = SentenceTransformer("all-MiniLM-L6-v2")
 
-    logger.info("Connecting to Qdrant at %s:%d …", args.qdrant_host, args.qdrant_port)
-    client = QdrantClient(host=args.qdrant_host, port=args.qdrant_port)
-    ensure_collection(client)
+    if args.qdrant_url:
+        logger.info("Connecting to Qdrant at %s …", args.qdrant_url)
+        client = QdrantClient(url=args.qdrant_url, api_key=args.qdrant_api_key)
+    else:
+        logger.info("Connecting to Qdrant at %s:%d …", args.qdrant_host, args.qdrant_port)
+        client = QdrantClient(host=args.qdrant_host, port=args.qdrant_port, api_key=args.qdrant_api_key)
+
+    ensure_collection(client, collection_name=args.collection)
 
     logger.info("Walking %s (repo=%s, domain=%s) …", target, args.repo_name, args.domain_context)
     all_chunks: list[Chunk] = list(walk_repo(target, args.repo_name, args.domain_context))
@@ -610,8 +634,8 @@ def main() -> None:
         logger.warning("No chunks found — nothing to ingest.")
         sys.exit(0)
 
-    count = upsert_chunks(client, model, all_chunks)
-    logger.info("✅  Ingestion complete — %d vectors upserted into '%s'.", count, COLLECTION_NAME)
+    count = upsert_chunks(client, model, all_chunks, collection_name=args.collection)
+    logger.info("✅  Ingestion complete — %d vectors upserted into '%s'.", count, args.collection)
 
 
 if __name__ == "__main__":

@@ -49,20 +49,26 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-COLLECTION_NAME = "propr_knowledge_base"
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "propr_knowledge_base")
 TOP_K = 10
 
 # ---------------------------------------------------------------------------
 # Globals — initialised at module load (once per process)
 # ---------------------------------------------------------------------------
+QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
 logger.info("Loading embedding model (all-MiniLM-L6-v2) …")
 _model = SentenceTransformer("all-MiniLM-L6-v2")
 
-logger.info("Connecting to Qdrant at %s:%s …", QDRANT_HOST, QDRANT_PORT)
-_qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+if QDRANT_URL:
+    logger.info("Connecting to Qdrant at %s …", QDRANT_URL)
+    _qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+else:
+    logger.info("Connecting to Qdrant at %s:%s …", QDRANT_HOST, QDRANT_PORT)
+    _qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, api_key=QDRANT_API_KEY)
 
 # ---------------------------------------------------------------------------
 # FastMCP application with Telemetry
@@ -79,6 +85,9 @@ class InstrumentedFastMCP(FastMCP):
         return app
 
 
+SERVER_HOST = os.getenv("MCP_HOST", "0.0.0.0")
+SERVER_PORT = int(os.getenv("MCP_PORT", "8000"))
+
 mcp = InstrumentedFastMCP(
     "ContextCore-MCP",
     instructions=(
@@ -86,6 +95,8 @@ mcp = InstrumentedFastMCP(
         "Qdrant knowledge base of ingested source code and business documents. "
         "Use the appropriate tool based on your current workflow phase."
     ),
+    host=SERVER_HOST,
+    port=SERVER_PORT,
 )
 
 
@@ -337,6 +348,8 @@ def get_deployment_infrastructure(target_service: str, repo_name: str) -> str:
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     logger.info(
-        "Starting ContextCore-MCP server on 0.0.0.0:8000 (SSE + Metrics) …"
+        "Starting ContextCore-MCP server on %s:%d (SSE + Metrics) …",
+        SERVER_HOST,
+        SERVER_PORT,
     )
-    mcp.run(transport="sse", host="0.0.0.0", port=8000)
+    mcp.run(transport="sse")

@@ -64,81 +64,176 @@ uv run python ingest.py /path/to/your/repo --repo-name my-service --domain-conte
 
 ## Propr Integration Example
 
-Ingest the Propr monorepo and its docs, then wire the MCP server into your agent workflow:
+ContextCore-MCP integrates directly with [**ProPR** (`integry/propr`)](https://github.com/integry/propr) — the open-source platform that turns GitHub issues into tested, production-ready Pull Requests using AI coding agents running in isolated Docker worktrees.
 
-### Step 1 — Ingest Propr services
+ContextCore-MCP serves as ProPR's semantic memory and AST retrieval backbone:
+
+```
+┌────────────────────────────────┐
+│   GitHub Issue / PR Created    │
+└───────────────┬────────────────┘
+                ▼
+┌────────────────────────────────┐
+│       ProPR Orchestrator       │
+│  (https://github.com/integry/  │
+│              propr)            │
+└───────┬────────────────┬───────┘
+        │                │
+        │ FastMCP (SSE)  │
+        ▼                ▼
+┌────────────────────────────────┐
+│        ContextCore-MCP         │
+│  • get_epic_planning_context   │
+│  • get_implementation_ast      │
+│  • get_testing_context         │
+│  • get_code_review_guidelines  │
+│  • get_deployment_infrastr.    │
+└───────────────┬────────────────┘
+                ▼
+┌────────────────────────────────┐
+│   Qdrant Knowledge Base        │
+│   (384-d Cosine Vectors)       │
+└────────────────────────────────┘
+```
+
+### Step 1 — Ingest the ProPR Codebase & Documentation
+
+Clone and ingest `integry/propr` (or any target repository) into your local or cloud Qdrant instance:
 
 ```bash
-# Ingest the main backend
-uv run python ingest.py ~/code/propr-backend \
-    --repo-name propr-backend \
-    --domain-context property-management
+# Clone integry/propr
+git clone https://github.com/integry/propr.git /tmp/propr
 
-# Ingest the frontend
-uv run python ingest.py ~/code/propr-frontend \
-    --repo-name propr-frontend \
-    --domain-context property-management
-
-# Ingest shared business docs (PRDs, ADRs, standards)
-uv run python ingest.py ~/code/propr-docs \
-    --repo-name propr-docs \
-    --domain-context property-management
+# Ingest with domain-context set to agent-orchestration
+uv run python ingest.py /tmp/propr \
+    --repo-name propr \
+    --domain-context agent-orchestration
 ```
 
-### Step 2 — Use the MCP tools in your agent
+### Step 2 — SDLC Agent Invocations in ProPR Workflows
 
-**Planning agent** — breaking an epic into issues:
+When ProPR processes an issue, its agents query ContextCore-MCP across each step of the pipeline:
 
+**1. Planning & Task Breakdown Agent** (`get_epic_planning_context`):
 ```
 Tool:  get_epic_planning_context
-Args:  topic="tenant onboarding flow", repo_name="propr-docs"
+Args:  topic="docker sandbox isolation and git worktree management", repo_name="propr"
 
-→ Returns PRDs, architecture decisions, and requirements
-  related to tenant onboarding.
+→ Returns architecture decision records (ADRs), execution environment PRDs,
+  and container security policies.
 ```
 
-**Coding agent** — implementing a feature:
-
+**2. Implementation / Coding Agent** (`get_implementation_ast`):
 ```
 Tool:  get_implementation_ast
-Args:  issue_description="Add lease renewal endpoint to the tenant service",
-       repo_name="propr-backend"
+Args:  issue_description="Add support for custom subagent execution timeout", repo_name="propr"
 
-→ Returns the existing TenantService class, lease models,
-  and related API route handlers.
+→ Returns the exact AST nodes for Runner execution classes, Task timeout handlers,
+  and worker dispatch loops.
 ```
 
-**Testing agent** — writing tests for new code:
-
+**3. Test Generation Agent** (`get_testing_context`):
 ```
 Tool:  get_testing_context
-Args:  modified_code="async def renew_lease(self, lease_id: str)...",
-       repo_name="propr-backend"
+Args:  modified_code="async def execute_task_with_timeout(self, task: Task, timeout: int)...", repo_name="propr"
 
-→ Returns existing test patterns (test_tenant.py) and the
-  original unmodified source code for the lease module.
+→ Returns existing pytest/asyncio test patterns, fixture definitions, and the
+  original unmodified execution engine source.
 ```
 
-**Review agent** — enforcing standards on a PR:
-
+**4. Pull Request Review Agent** (`get_code_review_guidelines`):
 ```
 Tool:  get_code_review_guidelines
-Args:  code_diff="+ async def renew_lease(self, ...",
-       repo_name="propr-docs"
+Args:  code_diff="+ async def execute_task_with_timeout(...", repo_name="propr"
 
-→ Returns team coding standards, naming conventions,
-  and relevant ADRs.
+→ Returns PR contribution standards, linting guidelines, and error-handling requirements.
 ```
 
-**Deployment agent** — deploying a service:
-
+**5. Sandboxed Runtime & CI Agent** (`get_deployment_infrastructure`):
 ```
 Tool:  get_deployment_infrastructure
-Args:  target_service="tenant-service",
-       repo_name="propr-backend"
+Args:  target_service="agent-runner", repo_name="propr"
 
-→ Returns the Dockerfile, CI/CD pipeline YAML,
-  and Terraform configs for the tenant service.
+→ Returns Dockerfile specifications, docker-compose configurations, and CI/CD workflows.
+```
+
+---
+
+## Automated CI/CD Ingestion (GitHub Actions)
+
+To ensure your Qdrant knowledge base is always up-to-date with your codebase, you can automate ingestion via GitHub Actions so that **every time a commit or Pull Request is merged to `main`, the repository is automatically re-ingested**.
+
+A ready-to-use workflow template is provided at [`examples/github-workflow-ingest.yml`](examples/github-workflow-ingest.yml).
+
+### How It Works
+
+```
+ Developer PR Merged to `main`
+              │
+              ▼
+ GitHub Actions Runner Launches (`ubuntu-latest`)
+              │
+              ├─▶ 1. Check out repository code
+              ├─▶ 2. Setup Python 3.11 via `astral-sh/setup-uv`
+              ├─▶ 3. Clone `ContextCore-MCP` ingestion engine
+              └─▶ 4. Run `uv run python ingest.py ..`
+                            │
+                            ▼
+           Upsert Embeddings to Qdrant Cluster
+```
+
+### Idempotency & Clean Updates
+
+ContextCore-MCP generates **deterministic UUIDs (UUID5)** for each chunk:
+```python
+uuid.uuid5(uuid.NAMESPACE_URL, f"{repo_name}:{file_path}:{chunk_index}")
+```
+- **Zero duplicates**: Running ingestion on every merge will safely update existing vectors in place.
+- **Fast execution**: Chunks that haven't changed retain their IDs and are quickly upserted or verified in Qdrant.
+
+### Setup Instructions for Any GitHub Repo
+
+1. In your target repository, copy [`examples/github-workflow-ingest.yml`](examples/github-workflow-ingest.yml) to `.github/workflows/contextcore-ingest.yml`.
+2. In your GitHub repository settings (**Settings** → **Secrets and variables** → **Actions**):
+   - Add Secret `QDRANT_URL` (e.g. `https://your-cluster.cloud.qdrant.io:6333` or your public endpoint) OR `QDRANT_HOST` / `QDRANT_PORT`.
+   - Add Secret `QDRANT_API_KEY` (if authentication is enabled).
+   - (Optional) Add Variable `DOMAIN_CONTEXT` (e.g. `agent-orchestration` or `payments`).
+3. Whenever a PR is merged into `main`, GitHub Actions will trigger and stream updated ASTs and documents directly into Qdrant.
+
+---
+
+## Testing with Local Repositories (e.g., TuneFlow)
+
+You can immediately test ContextCore-MCP with any local codebase on your machine. For example, testing with an Android/Kotlin music player like `/Users/venpan/Documents/myProjects/TuneFlow`:
+
+### Step 1 — Ingest the Local Codebase
+
+```bash
+uv run python ingest.py /Users/venpan/Documents/myProjects/TuneFlow \
+    --repo-name TuneFlow \
+    --domain-context music-player
+```
+
+This will walk the repository, parse Kotlin (`.kt`), Gradle infrastructure, and Markdown documentation, and upsert vectors into Qdrant.
+
+### Step 2 — Query via FastMCP Tools
+
+You can query the running server directly or connect your agent to `http://localhost:8000/sse`:
+
+```python
+# Query implementation AST for audio playback
+get_implementation_ast(
+    issue_description="audio playback background service and media player controls",
+    repo_name="TuneFlow"
+)
+# → Returns PlaybackViewModel, AudioPlayerService, and ExoPlayer integration ASTs!
+
+# Query design and architecture docs
+get_epic_planning_context(
+    topic="music player architecture and design system",
+    repo_name="TuneFlow"
+)
+# → Returns docs/design-system.md and UI theme specifications!
 ```
 
 ### Step 3 — MCP client configuration
@@ -266,9 +361,7 @@ To import it into any existing Grafana instance:
 
 ## Supported Languages
 
-The Tree-sitter parser handles: **Python**, **TypeScript**, **TSX**, **JavaScript**, **JSX**, **Go**, **Rust**, **Java**, and **Scala** (`.scala`, `.sc`).
-
-Extend by adding entries to `TS_LANGUAGE_MAP` and `ENTITY_NODE_TYPES` in [`ingest.py`](ingest.py).
+The Tree-sitter parser handles: **Python**, **TypeScript**, **TSX**, **JavaScript**, **JSX**, **Go**, **Rust**, **Java**, **Scala** (`.scala`, `.sc`), and **Kotlin** (`.kt`, `.kts`).
 
 Extend by adding entries to `TS_LANGUAGE_MAP` and `ENTITY_NODE_TYPES` in [`ingest.py`](ingest.py).
 
