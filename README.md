@@ -203,56 +203,6 @@ uuid.uuid5(uuid.NAMESPACE_URL, f"{repo_name}:{file_path}:{chunk_index}")
 
 ---
 
-## Testing with Local Repositories (e.g., TuneFlow)
-
-You can immediately test ContextCore-MCP with any local codebase on your machine. For example, testing with an Android/Kotlin music player like `/Users/venpan/Documents/myProjects/TuneFlow`:
-
-### Step 1 — Ingest the Local Codebase
-
-```bash
-uv run python ingest.py /Users/venpan/Documents/myProjects/TuneFlow \
-    --repo-name TuneFlow \
-    --domain-context music-player
-```
-
-This will walk the repository, parse Kotlin (`.kt`), Gradle infrastructure, and Markdown documentation, and upsert vectors into Qdrant.
-
-### Step 2 — Query via FastMCP Tools
-
-You can query the running server directly or connect your agent to `http://localhost:8000/sse`:
-
-```python
-# Query implementation AST for audio playback
-get_implementation_ast(
-    issue_description="audio playback background service and media player controls",
-    repo_name="TuneFlow"
-)
-# → Returns PlaybackViewModel, AudioPlayerService, and ExoPlayer integration ASTs!
-
-# Query design and architecture docs
-get_epic_planning_context(
-    topic="music player architecture and design system",
-    repo_name="TuneFlow"
-)
-# → Returns docs/design-system.md and UI theme specifications!
-```
-
-### Step 3 — MCP client configuration
-
-Add to your MCP client config (e.g. `claude_desktop_config.json`):
-
-```json
-{
-  "mcpServers": {
-    "contextcore": {
-      "url": "http://localhost:8000/sse"
-    }
-  }
-}
-```
-
-Or in Antigravity / Cursor / other MCP-compatible IDEs, point to `http://localhost:8000/sse`.
-
 ## Makefile Commands
 
 | Command | Description |
