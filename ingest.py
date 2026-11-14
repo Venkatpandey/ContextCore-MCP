@@ -71,6 +71,8 @@ TS_LANGUAGE_MAP: dict[str, str] = {
     ".java": "java",
     ".scala": "scala",
     ".sc": "scala",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
 }
 
 # Tree-sitter node types considered "top-level entities" per language.
@@ -128,6 +130,12 @@ ENTITY_NODE_TYPES: dict[str, set[str]] = {
         "function_definition",
         "type_definition",
         "enum_definition",
+    },
+    "kotlin": {
+        "class_declaration",
+        "object_declaration",
+        "function_declaration",
+        "property_declaration",
     },
 }
 
@@ -433,6 +441,10 @@ SKIP_DIRS: set[str] = {
     ".pytest_cache",
     ".next",
     "target",  # Rust / Java
+    ".gradle",
+    ".gradle-home",
+    ".idea",
+    ".kotlin",
 }
 
 
