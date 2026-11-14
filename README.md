@@ -147,7 +147,7 @@ uv run python ingest.py /path/to/target-repo --repo-name propr --domain-context 
 ```
 
 When an autonomous agent resolves an issue, it queries the 5 SDLC tools:
-- `get_epic_planning_context`: Queries PRDs and ADRs for architectural context.
+- `get_epic_planning_context`: Queries PRDs and ADRs for architectural context, with automatic code ground-truth fallback when documentation is sparse or absent.
 - `get_implementation_ast`: Locates specific classes, functions, and interfaces.
 - `get_testing_context`: Retrieves matching test conventions and fixtures.
 - `get_code_review_guidelines`: Verifies proposed patches against repo rules.

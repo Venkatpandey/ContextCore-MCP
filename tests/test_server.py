@@ -22,6 +22,7 @@ from server import (
     _embed,
     _search,
     _format_results,
+    get_epic_planning_context,
 )
 from qdrant_client.models import FieldCondition, MatchValue
 
@@ -86,6 +87,29 @@ class TestServerTools:
         )
         assert len(results) > 0
         assert any("payment" in r["content"].lower() for r in results)
+
+    def test_planning_context_with_docs(self):
+        out = get_epic_planning_context("payment processing requirements", self.REPO_NAME)
+        assert "payment" in out.lower()
+
+    def test_planning_context_code_fallback_when_docs_missing(self):
+        # Topic with code in auth.py but no documentation in docs/
+        out = get_epic_planning_context(
+            "authenticate user login tokens",
+            self.REPO_NAME,
+            include_code_fallback=True,
+        )
+        assert "Codebase Reality" in out
+        assert "auth.py" in out or "AuthService" in out
+
+    def test_planning_context_code_fallback_disabled(self):
+        # When fallback is disabled, missing docs should return no results
+        out = get_epic_planning_context(
+            "authenticate user login tokens",
+            self.REPO_NAME,
+            include_code_fallback=False,
+        )
+        assert "No relevant results found." in out
 
     # ── Tool: get_implementation_ast ───────────────────────────────────
 
