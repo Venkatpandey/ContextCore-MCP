@@ -14,6 +14,7 @@ Each tool:
 from __future__ import annotations
 
 import argparse
+import functools
 import logging
 import os
 import sys
@@ -33,6 +34,8 @@ from sentence_transformers import SentenceTransformer
 from starlette.applications import Starlette
 
 from telemetry import (
+    EMBEDDING_CACHE_HITS_TOTAL,
+    EMBEDDING_CACHE_MISSES_TOTAL,
     EMBEDDING_DURATION_SECONDS,
     QDRANT_QUERY_DURATION_SECONDS,
     QDRANT_RESULTS_RETURNED,
@@ -63,17 +66,31 @@ TOP_K = 10
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+QDRANT_GRPC_PORT = int(os.getenv("QDRANT_GRPC_PORT", "6334"))
+QDRANT_PREFER_GRPC = os.getenv("QDRANT_PREFER_GRPC", "false").lower() in ("true", "1", "yes")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
 logger.info("Loading embedding model (all-MiniLM-L6-v2) …")
 _model = SentenceTransformer("all-MiniLM-L6-v2")
 
 if QDRANT_URL:
-    logger.info("Connecting to Qdrant at %s …", QDRANT_URL)
-    _qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+    logger.info("Connecting to Qdrant at %s (prefer_grpc=%s) …", QDRANT_URL, QDRANT_PREFER_GRPC)
+    _qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, prefer_grpc=QDRANT_PREFER_GRPC)
 else:
-    logger.info("Connecting to Qdrant at %s:%s …", QDRANT_HOST, QDRANT_PORT)
-    _qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, api_key=QDRANT_API_KEY)
+    logger.info(
+        "Connecting to Qdrant at %s:%s (grpc_port=%s, prefer_grpc=%s) …",
+        QDRANT_HOST,
+        QDRANT_PORT,
+        QDRANT_GRPC_PORT,
+        QDRANT_PREFER_GRPC,
+    )
+    _qdrant = QdrantClient(
+        host=QDRANT_HOST,
+        port=QDRANT_PORT,
+        grpc_port=QDRANT_GRPC_PORT,
+        prefer_grpc=QDRANT_PREFER_GRPC,
+        api_key=QDRANT_API_KEY,
+    )
 
 
 def ensure_collection(client: QdrantClient, collection_name: str = COLLECTION_NAME) -> None:
@@ -127,10 +144,22 @@ mcp = InstrumentedFastMCP(
 # ---------------------------------------------------------------------------
 
 
-def _embed(text: str) -> list[float]:
-    """Encode *text* into a 384-d vector with telemetry."""
+@functools.lru_cache(maxsize=int(os.getenv("EMBEDDING_CACHE_SIZE", "2048")))
+def _raw_embed(text: str) -> tuple[float, ...]:
+    """Internal cached embedding function returning an immutable tuple."""
     with EMBEDDING_DURATION_SECONDS.time():
-        return _model.encode(text, show_progress_bar=False).tolist()
+        return tuple(_model.encode(text, show_progress_bar=False).tolist())
+
+
+def _embed(text: str) -> list[float]:
+    """Encode *text* into a 384-d vector with LRU caching and hit/miss telemetry."""
+    hits_before = _raw_embed.cache_info().hits
+    vec = list(_raw_embed(text))
+    if _raw_embed.cache_info().hits > hits_before:
+        EMBEDDING_CACHE_HITS_TOTAL.inc()
+    else:
+        EMBEDDING_CACHE_MISSES_TOTAL.inc()
+    return vec
 
 
 def _search(

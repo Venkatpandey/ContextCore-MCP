@@ -598,7 +598,19 @@ def main() -> None:
         "--qdrant-port",
         type=int,
         default=int(os.getenv("QDRANT_PORT", "6333")),
-        help="Qdrant server port.",
+        help="Qdrant server HTTP port.",
+    )
+    parser.add_argument(
+        "--qdrant-grpc-port",
+        type=int,
+        default=int(os.getenv("QDRANT_GRPC_PORT", "6334")),
+        help="Qdrant server gRPC port.",
+    )
+    parser.add_argument(
+        "--prefer-grpc",
+        action="store_true",
+        default=os.getenv("QDRANT_PREFER_GRPC", "false").lower() in ("true", "1", "yes"),
+        help="Use gRPC transport for faster point upserts.",
     )
     parser.add_argument(
         "--qdrant-api-key",
@@ -618,11 +630,23 @@ def main() -> None:
     model = SentenceTransformer("all-MiniLM-L6-v2")
 
     if args.qdrant_url:
-        logger.info("Connecting to Qdrant at %s …", args.qdrant_url)
-        client = QdrantClient(url=args.qdrant_url, api_key=args.qdrant_api_key)
+        logger.info("Connecting to Qdrant at %s (prefer_grpc=%s) …", args.qdrant_url, args.prefer_grpc)
+        client = QdrantClient(url=args.qdrant_url, api_key=args.qdrant_api_key, prefer_grpc=args.prefer_grpc)
     else:
-        logger.info("Connecting to Qdrant at %s:%d …", args.qdrant_host, args.qdrant_port)
-        client = QdrantClient(host=args.qdrant_host, port=args.qdrant_port, api_key=args.qdrant_api_key)
+        logger.info(
+            "Connecting to Qdrant at %s:%d (grpc_port=%d, prefer_grpc=%s) …",
+            args.qdrant_host,
+            args.qdrant_port,
+            args.qdrant_grpc_port,
+            args.prefer_grpc,
+        )
+        client = QdrantClient(
+            host=args.qdrant_host,
+            port=args.qdrant_port,
+            grpc_port=args.qdrant_grpc_port,
+            prefer_grpc=args.prefer_grpc,
+            api_key=args.qdrant_api_key,
+        )
 
     ensure_collection(client, collection_name=args.collection)
 

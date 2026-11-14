@@ -353,3 +353,59 @@ class TestIngestionIntegration:
         # Should NOT have business_logic or infrastructure
         assert "business_logic" not in types_returned
         assert "infrastructure" not in types_returned
+
+
+class TestGrpcIntegration:
+    """Integration test suite explicitly verifying Qdrant gRPC transport operations."""
+
+    GRPC_COLLECTION = "grpc_integration_test_collection"
+
+    @pytest.fixture
+    def grpc_client(self) -> QdrantClient:
+        """Create a live Qdrant client explicitly using gRPC transport."""
+        client = QdrantClient(host="localhost", port=6333, grpc_port=6334, prefer_grpc=True)
+        try:
+            client.delete_collection(self.GRPC_COLLECTION)
+        except Exception:
+            pass
+        yield client
+        try:
+            client.delete_collection(self.GRPC_COLLECTION)
+        except Exception:
+            pass
+
+    def test_grpc_collection_upsert_and_query(
+        self,
+        grpc_client: QdrantClient,
+        embed_model: SentenceTransformer,
+        sample_repo: Path,
+    ):
+        """Verify that ensure_collection, upsert_chunks, and query_points work over gRPC."""
+        from ingest import ensure_collection, upsert_chunks, walk_repo
+
+        # 1. Ensure collection over gRPC
+        ensure_collection(grpc_client, collection_name=self.GRPC_COLLECTION)
+        collections = [c.name for c in grpc_client.get_collections().collections]
+        assert self.GRPC_COLLECTION in collections
+
+        # 2. Extract and upsert chunks over gRPC
+        chunks = list(walk_repo(sample_repo, "grpc-repo", "payments"))
+        assert len(chunks) > 0
+        count = upsert_chunks(
+            grpc_client,
+            embed_model,
+            chunks,
+            collection_name=self.GRPC_COLLECTION,
+        )
+        assert count == len(chunks)
+
+        # 3. Query points over gRPC
+        query_vec = embed_model.encode("user authentication").tolist()
+        results = grpc_client.query_points(
+            collection_name=self.GRPC_COLLECTION,
+            query=query_vec,
+            limit=5,
+            with_payload=True,
+        ).points
+        assert len(results) > 0
+        assert results[0].payload["repo_name"] == "grpc-repo"
