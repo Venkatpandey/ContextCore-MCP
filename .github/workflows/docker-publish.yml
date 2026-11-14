@@ -1,9 +1,8 @@
-name: Build and Publish Docker Image
+name: Build and Push Development Image
 
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*.*.*' ]
   workflow_dispatch:
 
 env:
@@ -31,14 +30,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
+      - name: Extract metadata (edge and sha tags for dev builds)
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=tag
+            type=raw,value=edge,enable={{is_default_branch}}
             type=sha,format=short
 
       - name: Build and push image
