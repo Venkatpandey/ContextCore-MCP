@@ -1,6 +1,6 @@
 [project]
 name = "contextcore-mcp"
-version = "0.1.0"
+version = "1.0.0"
 description = "Universal SDLC-aware Code Intelligence & RAG engine over Qdrant and FastMCP for AI agents"
 readme = "README.md"
 license = "MIT"
