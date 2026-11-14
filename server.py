@@ -13,8 +13,10 @@ Each tool:
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
+import sys
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -38,11 +40,12 @@ from telemetry import (
 )
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging (directed to stderr to preserve stdout for JSON-RPC in stdio mode)
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
+    stream=sys.stderr,
 )
 logger = logging.getLogger(__name__)
 
@@ -347,9 +350,22 @@ def get_deployment_infrastructure(target_service: str, repo_name: str) -> str:
 # Entrypoint
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    logger.info(
-        "Starting ContextCore-MCP server on %s:%d (SSE + Metrics) …",
-        SERVER_HOST,
-        SERVER_PORT,
+    parser = argparse.ArgumentParser(description="ContextCore-MCP Server")
+    parser.add_argument(
+        "--transport",
+        choices=["sse", "stdio"],
+        default=os.getenv("MCP_TRANSPORT", "sse"),
+        help="Transport type ('sse' or 'stdio'). Default: sse",
     )
-    mcp.run(transport="sse")
+    args, _ = parser.parse_known_args()
+
+    if args.transport == "stdio":
+        logger.info("Starting ContextCore-MCP server on stdio …")
+        mcp.run(transport="stdio")
+    else:
+        logger.info(
+            "Starting ContextCore-MCP server on %s:%d (SSE + Metrics) …",
+            SERVER_HOST,
+            SERVER_PORT,
+        )
+        mcp.run(transport="sse")
