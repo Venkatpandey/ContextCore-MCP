@@ -1,0 +1,12 @@
+qdrant-client==1.12.1
+sentence-transformers==3.3.1
+tree-sitter==0.21.3
+tree-sitter-languages==1.10.2
+mcp[cli]==1.5.0
+pydantic>=2.10,<2.14
+uvicorn==0.32.1
+starlette==0.41.3
+httpx==0.28.1
+python-dotenv==1.0.1
+uuid6==2024.7.10
+pytest==8.3.3

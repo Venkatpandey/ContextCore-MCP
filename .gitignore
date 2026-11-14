@@ -1,0 +1,33 @@
+# Byte-compiled
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes (local)
+qdrant_storage/
+
+# HuggingFace cache
+.cache/
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Env
+.env
