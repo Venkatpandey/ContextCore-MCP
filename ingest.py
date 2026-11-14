@@ -33,6 +33,11 @@ from qdrant_client.models import (
 )
 from sentence_transformers import SentenceTransformer
 
+from telemetry import (
+    INGEST_BATCH_DURATION_SECONDS,
+    INGEST_CHUNKS_TOTAL,
+)
+
 # ---------------------------------------------------------------------------
 # Tree-sitter imports
 # ---------------------------------------------------------------------------
@@ -508,7 +513,15 @@ def upsert_chunks(
             )
             for chunk, emb in zip(batch, embeddings)
         ]
-        client.upsert(collection_name=COLLECTION_NAME, points=points)
+        with INGEST_BATCH_DURATION_SECONDS.time():
+            client.upsert(collection_name=COLLECTION_NAME, points=points)
+
+        for chunk in batch:
+            INGEST_CHUNKS_TOTAL.labels(
+                repo_name=chunk.repo_name,
+                document_type=chunk.document_type,
+            ).inc()
+
         total += len(points)
         logger.info("Upserted batch %d–%d (%d points)", i, i + len(batch), len(points))
 

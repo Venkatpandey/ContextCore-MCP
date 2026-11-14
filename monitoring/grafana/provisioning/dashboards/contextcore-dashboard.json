@@ -1,0 +1,98 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "MCP Tool Invocations (Rate/sec)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (tool_name, status) (rate(mcp_tool_calls_total[1m]))",
+          "legendFormat": "{{tool_name}} ({{status}})"
+        }
+      ]
+    },
+    {
+      "title": "Tool Execution Latency (p95 seconds)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, tool_name) (rate(mcp_tool_duration_seconds_bucket[1m])))",
+          "legendFormat": "p95 {{tool_name}}"
+        }
+      ]
+    },
+    {
+      "title": "Qdrant Total Vectors Stored",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "collections_vector_total",
+          "legendFormat": "Total Vectors"
+        }
+      ]
+    },
+    {
+      "title": "Qdrant CPU Cores Used",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 },
+      "targets": [
+        {
+          "expr": "cpu_cores_used",
+          "legendFormat": "Cores"
+        }
+      ]
+    },
+    {
+      "title": "Embedding Latency (p95 seconds)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(mcp_embedding_duration_seconds_bucket[1m])))",
+          "legendFormat": "p95 Embedding Latency"
+        }
+      ]
+    },
+    {
+      "title": "Ingested Chunks by Document Type",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "targets": [
+        {
+          "expr": "sum by (document_type) (mcp_ingest_chunks_total)",
+          "legendFormat": "{{document_type}}"
+        }
+      ]
+    },
+    {
+      "title": "Qdrant Query Latency (p95 seconds)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, tool_name) (rate(mcp_qdrant_query_duration_seconds_bucket[1m])))",
+          "legendFormat": "{{tool_name}}"
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["contextcore", "mcp", "qdrant"],
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "ContextCore-MCP Overview",
+  "uid": "contextcore-mcp-overview",
+  "version": 1
+}

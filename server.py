@@ -1,7 +1,8 @@
 """
 ContextCore-MCP — FastMCP Server
 ==================================
-Exposes five SDLC-aware retrieval tools over SSE transport.
+Exposes five SDLC-aware retrieval tools over SSE transport with built-in
+Prometheus telemetry (/metrics) and healthcheck (/healthz) endpoints.
 
 Each tool:
   1. Encodes the incoming query with `all-MiniLM-L6-v2` (384-d).
@@ -25,6 +26,16 @@ from qdrant_client.models import (
     SearchParams,
 )
 from sentence_transformers import SentenceTransformer
+from starlette.applications import Starlette
+
+from telemetry import (
+    EMBEDDING_DURATION_SECONDS,
+    QDRANT_QUERY_DURATION_SECONDS,
+    QDRANT_RESULTS_RETURNED,
+    healthz_endpoint,
+    prometheus_metrics_endpoint,
+    track_tool,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -54,13 +65,39 @@ logger.info("Connecting to Qdrant at %s:%s …", QDRANT_HOST, QDRANT_PORT)
 _qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
 
 # ---------------------------------------------------------------------------
+# FastMCP application with Telemetry
+# ---------------------------------------------------------------------------
+
+
+class InstrumentedFastMCP(FastMCP):
+    """FastMCP server with Prometheus metrics and health check routes."""
+
+    def sse_app(self) -> Starlette:
+        app = super().sse_app()
+        app.add_route("/metrics", prometheus_metrics_endpoint, methods=["GET"])
+        app.add_route("/healthz", healthz_endpoint, methods=["GET"])
+        return app
+
+
+mcp = InstrumentedFastMCP(
+    "ContextCore-MCP",
+    instructions=(
+        "ContextCore-MCP provides SDLC-aware retrieval tools that search a "
+        "Qdrant knowledge base of ingested source code and business documents. "
+        "Use the appropriate tool based on your current workflow phase."
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
 def _embed(text: str) -> list[float]:
-    """Encode *text* into a 384-d vector."""
-    return _model.encode(text, show_progress_bar=False).tolist()
+    """Encode *text* into a 384-d vector with telemetry."""
+    with EMBEDDING_DURATION_SECONDS.time():
+        return _model.encode(text, show_progress_bar=False).tolist()
 
 
 def _search(
@@ -68,22 +105,24 @@ def _search(
     must_conditions: list[FieldCondition],
     should_conditions: list[FieldCondition] | None = None,
     top_k: int = TOP_K,
+    tool_name: str = "search",
 ) -> list[dict[str, Any]]:
-    """Run a Qdrant search with the supplied filter conditions."""
+    """Run a Qdrant search with the supplied filter conditions and latency tracking."""
     filter_kwargs: dict[str, Any] = {"must": must_conditions}
     if should_conditions:
         filter_kwargs["should"] = should_conditions
 
-    response = _qdrant.query_points(
-        collection_name=COLLECTION_NAME,
-        query=query_vector,
-        query_filter=Filter(**filter_kwargs),
-        limit=top_k,
-        search_params=SearchParams(exact=False, hnsw_ef=128),
-        with_payload=True,
-    )
+    with QDRANT_QUERY_DURATION_SECONDS.labels(tool_name=tool_name).time():
+        response = _qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            query=query_vector,
+            query_filter=Filter(**filter_kwargs),
+            limit=top_k,
+            search_params=SearchParams(exact=False, hnsw_ef=128),
+            with_payload=True,
+        )
 
-    return [
+    results = [
         {
             "score": hit.score,
             "repo_name": hit.payload.get("repo_name"),
@@ -94,6 +133,8 @@ def _search(
         }
         for hit in response.points
     ]
+    QDRANT_RESULTS_RETURNED.labels(tool_name=tool_name).observe(len(results))
+    return results
 
 
 def _format_results(results: list[dict[str, Any]]) -> str:
@@ -114,22 +155,11 @@ def _format_results(results: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
-# ---------------------------------------------------------------------------
-# FastMCP application
-# ---------------------------------------------------------------------------
-mcp = FastMCP(
-    "ContextCore-MCP",
-    instructions=(
-        "ContextCore-MCP provides SDLC-aware retrieval tools that search a "
-        "Qdrant knowledge base of ingested source code and business documents. "
-        "Use the appropriate tool based on your current workflow phase."
-    ),
-)
-
 # ── Tool 1: Epic Planning ─────────────────────────────────────────────────
 
 
 @mcp.tool()
+@track_tool("get_epic_planning_context")
 def get_epic_planning_context(topic: str, repo_name: str) -> str:
     """Retrieve PRDs, architecture docs, and ADRs to help the planning agent
     break down an epic into issues.
@@ -148,6 +178,7 @@ def get_epic_planning_context(topic: str, repo_name: str) -> str:
                 key="document_type", match=MatchValue(value="business_logic")
             ),
         ],
+        tool_name="get_epic_planning_context",
     )
     return _format_results(results)
 
@@ -156,6 +187,7 @@ def get_epic_planning_context(topic: str, repo_name: str) -> str:
 
 
 @mcp.tool()
+@track_tool("get_implementation_ast")
 def get_implementation_ast(issue_description: str, repo_name: str) -> str:
     """Retrieve exact functions, classes, and interfaces needed for a coding
     agent to implement feature logic.
@@ -175,6 +207,7 @@ def get_implementation_ast(issue_description: str, repo_name: str) -> str:
             FieldCondition(key="repo_name", match=MatchValue(value=repo_name)),
             FieldCondition(key="document_type", match=MatchValue(value="code")),
         ],
+        tool_name="get_implementation_ast",
     )
     return _format_results(results)
 
@@ -183,6 +216,7 @@ def get_implementation_ast(issue_description: str, repo_name: str) -> str:
 
 
 @mcp.tool()
+@track_tool("get_testing_context")
 def get_testing_context(modified_code: str, repo_name: str) -> str:
     """Retrieve existing test patterns and the original unmodified source code
     so the testing agent can write coverage for the exact delta.
@@ -195,30 +229,31 @@ def get_testing_context(modified_code: str, repo_name: str) -> str:
     logger.info("get_testing_context(repo=%r)", repo_name)
     vec = _embed(modified_code)
 
-    # Use `should` for the OR condition: test_code OR code
-    # Combined with `must` for repo_name scoping.
-    response = _qdrant.query_points(
-        collection_name=COLLECTION_NAME,
-        query=vec,
-        query_filter=Filter(
-            must=[
-                FieldCondition(
-                    key="repo_name", match=MatchValue(value=repo_name)
-                ),
-            ],
-            should=[
-                FieldCondition(
-                    key="document_type", match=MatchValue(value="test_code")
-                ),
-                FieldCondition(
-                    key="document_type", match=MatchValue(value="code")
-                ),
-            ],
-        ),
-        limit=TOP_K,
-        search_params=SearchParams(exact=False, hnsw_ef=128),
-        with_payload=True,
-    )
+    with QDRANT_QUERY_DURATION_SECONDS.labels(
+        tool_name="get_testing_context"
+    ).time():
+        response = _qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            query=vec,
+            query_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="repo_name", match=MatchValue(value=repo_name)
+                    ),
+                ],
+                should=[
+                    FieldCondition(
+                        key="document_type", match=MatchValue(value="test_code")
+                    ),
+                    FieldCondition(
+                        key="document_type", match=MatchValue(value="code")
+                    ),
+                ],
+            ),
+            limit=TOP_K,
+            search_params=SearchParams(exact=False, hnsw_ef=128),
+            with_payload=True,
+        )
 
     formatted = [
         {
@@ -231,6 +266,9 @@ def get_testing_context(modified_code: str, repo_name: str) -> str:
         }
         for hit in response.points
     ]
+    QDRANT_RESULTS_RETURNED.labels(tool_name="get_testing_context").observe(
+        len(formatted)
+    )
     return _format_results(formatted)
 
 
@@ -238,6 +276,7 @@ def get_testing_context(modified_code: str, repo_name: str) -> str:
 
 
 @mcp.tool()
+@track_tool("get_code_review_guidelines")
 def get_code_review_guidelines(code_diff: str, repo_name: str) -> str:
     """Retrieve team coding standards and past architectural decisions to
     enforce during automated PR reviews.
@@ -256,6 +295,7 @@ def get_code_review_guidelines(code_diff: str, repo_name: str) -> str:
                 key="document_type", match=MatchValue(value="business_logic")
             ),
         ],
+        tool_name="get_code_review_guidelines",
     )
     return _format_results(results)
 
@@ -264,6 +304,7 @@ def get_code_review_guidelines(code_diff: str, repo_name: str) -> str:
 
 
 @mcp.tool()
+@track_tool("get_deployment_infrastructure")
 def get_deployment_infrastructure(target_service: str, repo_name: str) -> str:
     """Retrieve Dockerfiles, CI/CD yamls, and Terraform snippets for the
     deployment agent.
@@ -286,6 +327,7 @@ def get_deployment_infrastructure(target_service: str, repo_name: str) -> str:
                 key="document_type", match=MatchValue(value="infrastructure")
             ),
         ],
+        tool_name="get_deployment_infrastructure",
     )
     return _format_results(results)
 
@@ -294,5 +336,7 @@ def get_deployment_infrastructure(target_service: str, repo_name: str) -> str:
 # Entrypoint
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    logger.info("Starting ContextCore-MCP server on 0.0.0.0:8000 (SSE) …")
+    logger.info(
+        "Starting ContextCore-MCP server on 0.0.0.0:8000 (SSE + Metrics) …"
+    )
     mcp.run(transport="sse", host="0.0.0.0", port=8000)

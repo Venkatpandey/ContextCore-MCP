@@ -211,6 +211,61 @@ uv run pytest -v
 - Qdrant filter logic (must, should/OR)
 - MCP tool search helpers + result formatting
 
+## Observability & Telemetry (Prometheus & Grafana)
+
+ContextCore-MCP comes with built-in Prometheus instrumentation and a pre-configured Grafana dashboard for full-stack SDLC and infrastructure observability.
+
+### Architecture
+
+```
+                      ┌──────────────────────┐
+                      │   Grafana (:3000)    │
+                      └──────────┬───────────┘
+                                 │ PromQL
+                      ┌──────────▼───────────┐
+                      │  Prometheus (:9090)  │
+                      └────┬────────────┬────┘
+           Scrape :8000/metrics    Scrape :6333/metrics
+                           │            │
+             ┌─────────────▼────┐  ┌────▼─────────────┐
+             │  FastMCP Server  │  │ Qdrant Vector DB │
+             └──────────────────┘  └──────────────────┘
+```
+
+### Starting the Observability Stack
+
+```bash
+# Start Qdrant, FastMCP, Prometheus, and Grafana
+make observability-up
+
+# Or via docker compose directly:
+docker compose --profile observability up -d
+```
+
+| Service | Port | Endpoint | Credentials / Purpose |
+|---------|------|----------|-----------------------|
+| **FastMCP Metrics** | `8000` | `http://localhost:8000/metrics` | Prometheus text metrics |
+| **FastMCP Health** | `8000` | `http://localhost:8000/healthz` | HTTP 200 healthcheck |
+| **Qdrant Metrics** | `6333` | `http://localhost:6333/metrics` | Native Qdrant metrics |
+| **Prometheus** | `9090` | `http://localhost:9090` | Scraper & time-series DB |
+| **Grafana** | `3000` | `http://localhost:3000` | `admin` / `admin` (pre-provisioned dashboard) |
+
+### Key Exported Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `mcp_tool_calls_total{tool_name, status}` | Counter | Total MCP tool calls (by tool & success/error) |
+| `mcp_tool_duration_seconds{tool_name}` | Histogram | Execution duration of each tool call |
+| `mcp_qdrant_query_duration_seconds{tool_name}` | Histogram | Latency of Qdrant vector retrieval |
+| `mcp_qdrant_results_returned{tool_name}` | Histogram | Number of matches returned from Qdrant |
+| `mcp_embedding_duration_seconds` | Histogram | Latency of SentenceTransformers embeddings |
+| `mcp_ingest_chunks_total{repo_name, document_type}` | Counter | Ingested chunks by repository and document type |
+| `mcp_ingest_batch_duration_seconds` | Histogram | Latency of batch upsert operations |
+| `collections_vector_total` | Gauge | Native Qdrant: total vectors across collections |
+| `cpu_cores_used` | Gauge | Native Qdrant: CPU utilization |
+
+---
+
 ## Supported Languages
 
 The Tree-sitter parser handles: **Python**, **TypeScript**, **TSX**, **JavaScript**, **JSX**, **Go**, **Rust**, **Java**.
