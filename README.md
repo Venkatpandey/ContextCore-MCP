@@ -34,6 +34,7 @@ A local, Dockerized RAG service that ingests multi-repo source code and business
 | Component | Choice |
 |-----------|--------|
 | Language | Python 3.11 |
+| Package & Dep Management | `uv` (pyproject.toml + uv.lock) |
 | Vector DB | Qdrant (Docker) |
 | Embeddings | `all-MiniLM-L6-v2` (384-d) |
 | AST Parser | tree-sitter + tree-sitter-languages |
@@ -47,14 +48,16 @@ A local, Dockerized RAG service that ingests multi-repo source code and business
 git clone git@github.com:Venkatpandey/ContextCore-MCP.git
 cd ContextCore-MCP
 
-# 2. Start Qdrant + MCP server
-make up
+# 2. Sync dependencies with uv (creates virtualenv & installs all locked deps)
+uv sync
 
-# 3. Install Python deps locally (for ingestion & tests)
-pip install -r requirements.txt
+# 3. Start Qdrant + MCP server
+make up
 
 # 4. Ingest a repo
 make ingest REPO_PATH=/path/to/your/repo REPO_NAME=my-service DOMAIN=payments
+# Or directly:
+uv run python ingest.py /path/to/your/repo --repo-name my-service --domain-context payments
 
 # 5. Connect your AI agent to http://localhost:8000/sse
 ```
@@ -67,17 +70,17 @@ Ingest the Propr monorepo and its docs, then wire the MCP server into your agent
 
 ```bash
 # Ingest the main backend
-python ingest.py ~/code/propr-backend \
+uv run python ingest.py ~/code/propr-backend \
     --repo-name propr-backend \
     --domain-context property-management
 
 # Ingest the frontend
-python ingest.py ~/code/propr-frontend \
+uv run python ingest.py ~/code/propr-frontend \
     --repo-name propr-frontend \
     --domain-context property-management
 
 # Ingest shared business docs (PRDs, ADRs, standards)
-python ingest.py ~/code/propr-docs \
+uv run python ingest.py ~/code/propr-docs \
     --repo-name propr-docs \
     --domain-context property-management
 ```
@@ -193,9 +196,9 @@ Tests run against a live Qdrant Docker container — no mocks for the data layer
 # Start Qdrant, then run tests
 make test
 
-# Or manually
+# Or manually via uv
 docker compose up -d qdrant
-python -m pytest tests/ -v
+uv run pytest -v
 ```
 
 **Test coverage:**

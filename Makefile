@@ -1,4 +1,10 @@
-.PHONY: up down logs restart test ingest clean build status
+.PHONY: up down logs restart test ingest clean build status sync
+
+# ---------------------------------------------------------------------------
+# Dependency Management (uv)
+# ---------------------------------------------------------------------------
+sync:
+	uv sync
 
 # ---------------------------------------------------------------------------
 # Infrastructure
@@ -33,7 +39,7 @@ status:
 ingest:
 	@test -n "$(REPO_PATH)" || (echo "Usage: make ingest REPO_PATH=/path/to/repo REPO_NAME=my-svc" && exit 1)
 	@test -n "$(REPO_NAME)" || (echo "Usage: make ingest REPO_PATH=/path/to/repo REPO_NAME=my-svc" && exit 1)
-	python ingest.py $(REPO_PATH) --repo-name $(REPO_NAME) $(if $(DOMAIN),--domain-context $(DOMAIN),)
+	uv run python ingest.py $(REPO_PATH) --repo-name $(REPO_NAME) $(if $(DOMAIN),--domain-context $(DOMAIN),)
 
 # ---------------------------------------------------------------------------
 # Testing
@@ -44,7 +50,7 @@ test: up
 		curl -sf http://localhost:6333/healthz > /dev/null 2>&1 && break; \
 		echo "  retry $$i …"; sleep 2; \
 	done
-	python -m pytest tests/ -v --tb=short -x
+	uv run pytest -v --tb=short -x
 	@echo "Tests passed ✅"
 
 # ---------------------------------------------------------------------------

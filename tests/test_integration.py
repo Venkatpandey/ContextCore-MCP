@@ -218,9 +218,9 @@ class TestIngestionIntegration:
         upsert_chunks(qdrant, embed_model, chunks)
 
         vec = embed_model.encode("authentication login").tolist()
-        results = qdrant.search(
+        results = qdrant.query_points(
             collection_name=COLLECTION_NAME,
-            query_vector=vec,
+            query=vec,
             query_filter=Filter(
                 must=[
                     FieldCondition(
@@ -234,7 +234,7 @@ class TestIngestionIntegration:
             ),
             limit=5,
             with_payload=True,
-        )
+        ).points
         assert len(results) > 0
         assert all(r.payload["document_type"] == "code" for r in results)
 
@@ -251,9 +251,9 @@ class TestIngestionIntegration:
         upsert_chunks(qdrant, embed_model, chunks)
 
         vec = embed_model.encode("payment processing stripe").tolist()
-        results = qdrant.search(
+        results = qdrant.query_points(
             collection_name=COLLECTION_NAME,
-            query_vector=vec,
+            query=vec,
             query_filter=Filter(
                 must=[
                     FieldCondition(
@@ -264,7 +264,7 @@ class TestIngestionIntegration:
             ),
             limit=3,
             with_payload=True,
-        )
+        ).points
         assert len(results) > 0
         assert any("payment" in r.payload["content"].lower() for r in results)
 
@@ -298,9 +298,9 @@ class TestIngestionIntegration:
         upsert_chunks(qdrant, embed_model, chunks)
 
         vec = embed_model.encode("login authentication test").tolist()
-        results = qdrant.search(
+        results = qdrant.query_points(
             collection_name=COLLECTION_NAME,
-            query_vector=vec,
+            query=vec,
             query_filter=Filter(
                 must=[
                     FieldCondition(
@@ -321,7 +321,7 @@ class TestIngestionIntegration:
             ),
             limit=10,
             with_payload=True,
-        )
+        ).points
         types_returned = {r.payload["document_type"] for r in results}
         # Should have at least one of the OR'd types
         assert types_returned & {"test_code", "code"}

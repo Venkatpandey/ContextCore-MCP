@@ -73,13 +73,10 @@ def _search(
     filter_kwargs: dict[str, Any] = {"must": must_conditions}
     if should_conditions:
         filter_kwargs["should"] = should_conditions
-        # When using `should`, Qdrant requires at least one `should` to match.
-        # We remove `must` conditions that overlap with `should` to avoid
-        # contradictions; however here `must` is always repo_name so it's fine.
 
-    results = _qdrant.search(
+    response = _qdrant.query_points(
         collection_name=COLLECTION_NAME,
-        query_vector=query_vector,
+        query=query_vector,
         query_filter=Filter(**filter_kwargs),
         limit=top_k,
         search_params=SearchParams(exact=False, hnsw_ef=128),
@@ -95,7 +92,7 @@ def _search(
             "entity_name": hit.payload.get("entity_name"),
             "content": hit.payload.get("content"),
         }
-        for hit in results
+        for hit in response.points
     ]
 
 
@@ -200,9 +197,9 @@ def get_testing_context(modified_code: str, repo_name: str) -> str:
 
     # Use `should` for the OR condition: test_code OR code
     # Combined with `must` for repo_name scoping.
-    results = _qdrant.search(
+    response = _qdrant.query_points(
         collection_name=COLLECTION_NAME,
-        query_vector=vec,
+        query=vec,
         query_filter=Filter(
             must=[
                 FieldCondition(
@@ -232,7 +229,7 @@ def get_testing_context(modified_code: str, repo_name: str) -> str:
             "entity_name": hit.payload.get("entity_name"),
             "content": hit.payload.get("content"),
         }
-        for hit in results
+        for hit in response.points
     ]
     return _format_results(formatted)
 
