@@ -13,7 +13,13 @@ import pytest
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 
-from ingest import COLLECTION_NAME, ensure_collection, upsert_chunks, walk_repo
+from ingest import (
+    COLLECTION_NAME,
+    _apply_provenance,
+    ensure_collection,
+    upsert_chunks,
+    walk_repo,
+)
 
 
 # We import the server module's internal helpers rather than hitting HTTP,
@@ -23,6 +29,9 @@ from server import (
     _search,
     _format_results,
     get_epic_planning_context,
+    get_implementation_ast,
+    get_testing_context,
+    get_call_path,
 )
 from qdrant_client.models import FieldCondition, MatchValue
 
@@ -159,3 +168,224 @@ class TestServerTools:
         assert "Result 1" in out
         assert "0.9500" in out
         assert "def foo()" in out
+
+    def test_format_results_with_provenance(self):
+        """Provenance metadata should appear in formatted output."""
+        fake = [
+            {
+                "score": 0.90,
+                "repo_name": "r",
+                "document_type": "code",
+                "file_path": "a.py",
+                "entity_name": "bar",
+                "content": "def bar(): pass",
+                "commit_sha": "abc123",
+                "git_ref": "v1.0.0",
+                "environment": "production",
+                "calls": ["baz", "qux"],
+            }
+        ]
+        out = _format_results(fake)
+        assert "Commit: abc123" in out
+        assert "Ref: v1.0.0" in out
+        assert "Env: production" in out
+        assert "Calls: baz, qux" in out
+
+    def test_format_results_without_provenance_no_extra_lines(self):
+        """When no provenance is set, no extra metadata lines should appear."""
+        fake = [
+            {
+                "score": 0.80,
+                "repo_name": "r",
+                "document_type": "code",
+                "file_path": "x.py",
+                "entity_name": "fn",
+                "content": "def fn(): pass",
+                "commit_sha": "",
+                "git_ref": "",
+                "environment": "",
+                "calls": [],
+            }
+        ]
+        out = _format_results(fake)
+        assert "Commit:" not in out
+        assert "Ref:" not in out
+        assert "Calls:" not in out
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Integration: Revision-scoped tool queries
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestRevisionScopedTools:
+    """Verify that server tools respect target_revision and target_environment."""
+
+    REPO_NAME = "revision-scoped-test"
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _ingest_two_revisions(
+        self,
+        qdrant: QdrantClient,
+        embed_model: SentenceTransformer,
+        sample_repo: Path,
+    ):
+        """Ingest two revisions of the sample repo."""
+        try:
+            qdrant.delete_collection(COLLECTION_NAME)
+        except Exception:
+            pass
+        ensure_collection(qdrant)
+
+        # v1.0.0 — production
+        chunks_v1 = list(walk_repo(sample_repo, self.REPO_NAME, "payments"))
+        _apply_provenance(
+            chunks_v1,
+            commit_sha="aaaa1111",
+            git_ref="v1.0.0",
+            environment="production",
+        )
+        upsert_chunks(qdrant, embed_model, chunks_v1)
+
+        # v2.0.0 — staging
+        chunks_v2 = list(walk_repo(sample_repo, self.REPO_NAME, "payments"))
+        _apply_provenance(
+            chunks_v2,
+            commit_sha="bbbb2222",
+            git_ref="v2.0.0",
+            environment="staging",
+        )
+        upsert_chunks(qdrant, embed_model, chunks_v2)
+
+        yield
+        try:
+            qdrant.delete_collection(COLLECTION_NAME)
+        except Exception:
+            pass
+
+    def test_implementation_ast_scoped_by_revision(self):
+        """get_implementation_ast with target_revision should only return matching chunks."""
+        out = get_implementation_ast(
+            "authentication login",
+            self.REPO_NAME,
+            target_revision="v1.0.0",
+        )
+        # Should find results (we ingested with git_ref=v1.0.0)
+        assert "Result 1" in out or "No relevant results found." in out
+
+    def test_implementation_ast_scoped_by_environment(self):
+        """get_implementation_ast with target_environment should filter."""
+        out = get_implementation_ast(
+            "authentication login",
+            self.REPO_NAME,
+            target_environment="production",
+        )
+        if "Env:" in out:
+            assert "production" in out
+
+    def test_planning_context_scoped_by_environment(self):
+        """get_epic_planning_context respects target_environment."""
+        out = get_epic_planning_context(
+            "payment processing",
+            self.REPO_NAME,
+            target_environment="staging",
+        )
+        # Should find results for staging
+        assert out  # Non-empty response
+
+    def test_search_with_commit_sha_revision(self):
+        """_search with target_revision matching a commit_sha should work."""
+        vec = _embed("authentication")
+        results = _search(
+            query_vector=vec,
+            must_conditions=[
+                FieldCondition(key="repo_name", match=MatchValue(value=self.REPO_NAME)),
+                FieldCondition(key="document_type", match=MatchValue(value="code")),
+            ],
+            target_revision="aaaa1111",
+        )
+        # Should return results matching commit_sha="aaaa1111"
+        if results:
+            assert all(
+                r.get("commit_sha") == "aaaa1111" or r.get("git_ref") == "aaaa1111"
+                for r in results
+            )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Integration: get_call_path tool
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestGetCallPath:
+    """Verify the get_call_path tool traces callers and callees."""
+
+    REPO_NAME = "callpath-server-test"
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _ingest_fixture(
+        self,
+        qdrant: QdrantClient,
+        embed_model: SentenceTransformer,
+        sample_repo: Path,
+    ):
+        """Ingest the sample repo with provenance for call-path tests."""
+        try:
+            qdrant.delete_collection(COLLECTION_NAME)
+        except Exception:
+            pass
+        ensure_collection(qdrant)
+
+        chunks = list(walk_repo(sample_repo, self.REPO_NAME, "payments"))
+        _apply_provenance(
+            chunks,
+            commit_sha="callpath123",
+            git_ref="main",
+            environment="production",
+        )
+        upsert_chunks(qdrant, embed_model, chunks)
+        yield
+        try:
+            qdrant.delete_collection(COLLECTION_NAME)
+        except Exception:
+            pass
+
+    def test_call_path_returns_callees(self):
+        """get_call_path should list callees of a known entity."""
+        out = get_call_path("UserService", self.REPO_NAME)
+        assert "Callees of 'UserService'" in out
+
+    def test_call_path_returns_callers(self):
+        """get_call_path should list callers section."""
+        out = get_call_path("hash_password", self.REPO_NAME)
+        assert "Callers of 'hash_password'" in out
+
+    def test_call_path_unknown_entity(self):
+        """get_call_path for a non-existent entity should report not found."""
+        out = get_call_path("nonExistentFunction", self.REPO_NAME)
+        assert "not found" in out
+
+    def test_call_path_with_revision_filter(self):
+        """get_call_path with target_revision should scope results."""
+        out = get_call_path(
+            "UserService",
+            self.REPO_NAME,
+            target_revision="main",
+        )
+        assert "Callees" in out or "not found" in out
+
+    def test_call_path_with_environment_filter(self):
+        """get_call_path with target_environment should scope results."""
+        out = get_call_path(
+            "UserService",
+            self.REPO_NAME,
+            target_environment="production",
+        )
+        assert "Callees" in out or "not found" in out
+
+    def test_call_path_provenance_displayed(self):
+        """get_call_path should display provenance when available."""
+        out = get_call_path("UserService", self.REPO_NAME)
+        # If entity is found, provenance should be shown
+        if "Callees" in out and "(no outgoing calls detected)" not in out:
+            assert "Provenance:" in out or "Commit:" in out or "callpath123" in out

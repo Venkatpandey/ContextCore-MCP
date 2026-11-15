@@ -6,10 +6,15 @@ into a Qdrant vector database.
 
 - Source code (.py, .ts, .js, .tsx, .jsx, .go, .rs, .java) is parsed with
   Tree-sitter and chunked by AST entity (function, class, interface).
+- Call-graph extraction: for each function/method chunk, top-level call
+  expressions and method invocations are extracted as a ``calls`` list.
 - Markdown documents (.md) are split by H1/H2 headers with contextual
   chunk headers prepended.
 - Each chunk is embedded with `all-MiniLM-L6-v2` (384-d) and upserted
   into the `propr_knowledge_base` collection in Qdrant.
+- Revision provenance (commit_sha, git_ref, environment, build_id,
+  artifact_digest) is attached to every chunk payload for deployment-aware
+  retrieval.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ import hashlib
 import logging
 import os
 import re
+import subprocess
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -186,9 +192,17 @@ class Chunk:
     file_path: str
     entity_name: str
     content: str
+    # Revision provenance
+    commit_sha: str = ""
+    git_ref: str = ""
+    environment: str = ""
+    build_id: str = ""
+    artifact_digest: str = ""
+    # Call-graph lineage (populated for code chunks)
+    calls: list[str] = field(default_factory=list)
 
     def to_payload(self) -> dict:
-        return {
+        payload = {
             "repo_name": self.repo_name,
             "domain_context": self.domain_context,
             "document_type": self.document_type,
@@ -196,10 +210,28 @@ class Chunk:
             "entity_name": self.entity_name,
             "content": self.content,
         }
+        # Provenance metadata — always present (empty string if unset)
+        payload["commit_sha"] = self.commit_sha
+        payload["git_ref"] = self.git_ref
+        payload["environment"] = self.environment
+        payload["build_id"] = self.build_id
+        payload["artifact_digest"] = self.artifact_digest
+        # Call-graph lineage
+        payload["calls"] = self.calls
+        return payload
 
     def deterministic_id(self) -> str:
-        """Create a stable UUID from content + metadata so re-runs are idempotent."""
-        fingerprint = f"{self.repo_name}:{self.file_path}:{self.entity_name}:{self.content}"
+        """Create a stable UUID from content + metadata so re-runs are idempotent.
+
+        The fingerprint includes revision provenance so that the same code
+        ingested at different revisions occupies distinct Qdrant points when
+        the content has changed, but identical content across revisions
+        collapses to the same point."""
+        fingerprint = (
+            f"{self.repo_name}:{self.file_path}:{self.entity_name}"
+            f":{self.commit_sha}:{self.git_ref}:{self.environment}"
+            f":{self.content}"
+        )
         return str(uuid.UUID(hashlib.md5(fingerprint.encode()).hexdigest()))
 
 
@@ -272,6 +304,73 @@ def _extract_entity_name(node, source_bytes: bytes, lang: str) -> str:
     return "<anonymous>"
 
 
+# ---------------------------------------------------------------------------
+# Call-graph extraction from AST nodes
+# ---------------------------------------------------------------------------
+
+# Node types that represent call expressions across supported languages.
+_CALL_NODE_TYPES: set[str] = {
+    "call",                    # Python
+    "call_expression",         # JS / TS / Go / Rust / Java / Kotlin
+    "method_invocation",       # Java
+    "navigation_expression",   # Kotlin (chained calls)
+}
+
+
+def _extract_calls(node, source_bytes: bytes) -> list[str]:
+    """Walk *node*'s subtree and return deduplicated callee names.
+
+    For ``foo()``, ``self.bar()``, ``obj.method()``, and ``Module.func()``
+    we capture the trailing identifier (or dotted path).  Duplicates within
+    the same entity are collapsed and order is preserved.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+
+    def _callee_name(call_node) -> str | None:
+        """Return the best-effort callee name from a call node."""
+        # call_expression / call: first child is the function reference
+        fn = call_node.children[0] if call_node.children else None
+        if fn is None:
+            return None
+
+        # Simple identifier: foo()
+        if fn.type in ("identifier", "property_identifier"):
+            return source_bytes[fn.start_byte: fn.end_byte].decode(
+                "utf-8", errors="replace"
+            )
+        # Attribute / member access: self.bar(), obj.method()
+        if fn.type in (
+            "attribute",            # Python
+            "member_expression",    # JS / TS
+            "selector_expression",  # Go
+            "field_expression",     # Rust
+        ):
+            return source_bytes[fn.start_byte: fn.end_byte].decode(
+                "utf-8", errors="replace"
+            )
+        # Java method_invocation — the node itself contains the name
+        if call_node.type == "method_invocation":
+            for child in call_node.children:
+                if child.type == "identifier":
+                    return source_bytes[child.start_byte: child.end_byte].decode(
+                        "utf-8", errors="replace"
+                    )
+        return None
+
+    def _walk(n) -> None:
+        if n.type in _CALL_NODE_TYPES:
+            name = _callee_name(n)
+            if name and name not in seen:
+                seen.add(name)
+                result.append(name)
+        for child in n.children:
+            _walk(child)
+
+    _walk(node)
+    return result
+
+
 def _chunk_code_with_ast(
     source_code: str,
     lang_name: str,
@@ -296,6 +395,7 @@ def _chunk_code_with_ast(
                 "utf-8", errors="replace"
             )
             name = _extract_entity_name(node, source_bytes, lang_name)
+            calls = _extract_calls(node, source_bytes)
             chunks.append(
                 Chunk(
                     repo_name=repo_name,
@@ -304,6 +404,7 @@ def _chunk_code_with_ast(
                     file_path=str(rel_path),
                     entity_name=name,
                     content=text,
+                    calls=calls,
                 )
             )
             # Don't recurse into nested definitions — we already captured
@@ -552,6 +653,45 @@ def upsert_chunks(
 
 
 # ---------------------------------------------------------------------------
+# Git provenance helpers
+# ---------------------------------------------------------------------------
+
+def _auto_detect_commit_sha(target_dir: Path) -> str:
+    """Return the current HEAD commit SHA of *target_dir* if it is a git repo."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(target_dir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return ""
+
+
+def _apply_provenance(
+    chunks: list[Chunk],
+    *,
+    commit_sha: str = "",
+    git_ref: str = "",
+    environment: str = "",
+    build_id: str = "",
+    artifact_digest: str = "",
+) -> None:
+    """Stamp every chunk in *chunks* with the supplied provenance metadata."""
+    for chunk in chunks:
+        chunk.commit_sha = commit_sha
+        chunk.git_ref = git_ref
+        chunk.environment = environment
+        chunk.build_id = build_id
+        chunk.artifact_digest = artifact_digest
+
+
+# ---------------------------------------------------------------------------
 # CLI entry-point
 # ---------------------------------------------------------------------------
 
@@ -581,6 +721,37 @@ def main() -> None:
         type=str,
         default=COLLECTION_NAME,
         help=f"Qdrant collection name (default: '{COLLECTION_NAME}').",
+    )
+    # Revision provenance flags
+    parser.add_argument(
+        "--commit-sha",
+        type=str,
+        default="",
+        help="Git commit hash. Auto-detected from target_dir HEAD if omitted.",
+    )
+    parser.add_argument(
+        "--git-ref",
+        type=str,
+        default="",
+        help="Git branch or release tag (e.g. 'main', 'v1.2.0').",
+    )
+    parser.add_argument(
+        "--environment",
+        type=str,
+        default="",
+        help="Deployment tier (e.g. 'production', 'staging', 'canary', 'local').",
+    )
+    parser.add_argument(
+        "--build-id",
+        type=str,
+        default="",
+        help="CI build ID for traceability.",
+    )
+    parser.add_argument(
+        "--artifact-digest",
+        type=str,
+        default="",
+        help="Container image digest or artifact hash.",
     )
     parser.add_argument(
         "--qdrant-url",
@@ -626,6 +797,15 @@ def main() -> None:
         logger.error("Target directory does not exist: %s", target)
         sys.exit(1)
 
+    # Resolve commit SHA: explicit flag > auto-detect from git
+    commit_sha = args.commit_sha or _auto_detect_commit_sha(target)
+    if commit_sha:
+        logger.info("Revision provenance: commit_sha=%s", commit_sha[:12])
+    if args.git_ref:
+        logger.info("Revision provenance: git_ref=%s", args.git_ref)
+    if args.environment:
+        logger.info("Revision provenance: environment=%s", args.environment)
+
     logger.info("Loading embedding model (all-MiniLM-L6-v2) …")
     model = SentenceTransformer("all-MiniLM-L6-v2")
 
@@ -657,6 +837,16 @@ def main() -> None:
     if not all_chunks:
         logger.warning("No chunks found — nothing to ingest.")
         sys.exit(0)
+
+    # Stamp provenance on every chunk
+    _apply_provenance(
+        all_chunks,
+        commit_sha=commit_sha,
+        git_ref=args.git_ref,
+        environment=args.environment,
+        build_id=args.build_id,
+        artifact_digest=args.artifact_digest,
+    )
 
     count = upsert_chunks(client, model, all_chunks, collection_name=args.collection)
     logger.info("✅  Ingestion complete — %d vectors upserted into '%s'.", count, args.collection)

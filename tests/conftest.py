@@ -70,6 +70,36 @@ def hash_password(plain: str) -> str:
 '''
     )
 
+    # ── Python source with calls for call-graph tests ──
+    (root / "src" / "user_service.py").write_text(
+        '''"""User service that depends on auth."""
+
+from auth import AuthService, hash_password
+
+
+class UserService:
+    """Manages user lifecycle."""
+
+    def __init__(self):
+        self.auth = AuthService()
+
+    def register(self, username: str, password: str) -> str:
+        """Register a new user."""
+        hashed = hash_password(password)
+        token = self.auth.login(username, password)
+        self._send_welcome_email(username)
+        return token
+
+    def _send_welcome_email(self, username: str) -> None:
+        """Send a welcome email to the newly registered user."""
+        print(f"Welcome {username}!")
+
+    def deactivate(self, token: str) -> bool:
+        """Deactivate a user session."""
+        return self.auth.logout(token)
+'''
+    )
+
     # ── TypeScript source ──
     (root / "src" / "payments.ts").write_text(
         '''export interface PaymentRequest {

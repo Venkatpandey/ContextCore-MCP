@@ -15,9 +15,11 @@ from sentence_transformers import SentenceTransformer
 from ingest import (
     COLLECTION_NAME,
     Chunk,
+    _apply_provenance,
     _chunk_code_with_ast,
     _chunk_markdown,
     _classify_code_file,
+    _extract_calls,
     _is_test_file,
     ensure_collection,
     upsert_chunks,
@@ -136,6 +138,192 @@ def calculateTax(amount: Double): Double = amount * 0.2
             "", "python", Path("src/empty.py"), "test-repo", "general"
         )
         assert chunks == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Unit-level: Call-graph extraction
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestCallGraphExtraction:
+    """Verify that _extract_calls captures function/method invocations."""
+
+    def test_python_simple_calls(self):
+        source = '''def process():
+    result = compute()
+    save(result)
+    return result
+'''
+        chunks = _chunk_code_with_ast(
+            source, "python", Path("src/proc.py"), "test-repo", "general"
+        )
+        assert len(chunks) == 1
+        calls = chunks[0].calls
+        assert "compute" in calls
+        assert "save" in calls
+
+    def test_python_method_calls(self):
+        source = '''class Handler:
+    def handle(self, request):
+        data = self.validate(request)
+        self.process(data)
+        return self.respond(data)
+'''
+        chunks = _chunk_code_with_ast(
+            source, "python", Path("src/handler.py"), "test-repo", "general"
+        )
+        assert len(chunks) == 1
+        calls = chunks[0].calls
+        assert any("validate" in c for c in calls)
+        assert any("process" in c for c in calls)
+        assert any("respond" in c for c in calls)
+
+    def test_python_no_calls_returns_empty(self):
+        source = '''def constant():
+    return 42
+'''
+        chunks = _chunk_code_with_ast(
+            source, "python", Path("src/const.py"), "test-repo", "general"
+        )
+        assert len(chunks) == 1
+        assert chunks[0].calls == []
+
+    def test_calls_deduplicated(self):
+        source = '''def repetitive():
+    foo()
+    foo()
+    foo()
+'''
+        chunks = _chunk_code_with_ast(
+            source, "python", Path("src/rep.py"), "test-repo", "general"
+        )
+        assert len(chunks) == 1
+        assert chunks[0].calls.count("foo") == 1
+
+    def test_typescript_calls(self):
+        source = '''export function orchestrate(input: string): string {
+  const validated = validate(input);
+  const result = transform(validated);
+  return format(result);
+}
+'''
+        chunks = _chunk_code_with_ast(
+            source, "typescript", Path("src/orch.ts"), "test-repo", "general"
+        )
+        assert len(chunks) >= 1
+        # Find the chunk for orchestrate (may be inside an export_statement)
+        orch_chunk = next(
+            (c for c in chunks if "orchestrate" in c.content), None
+        )
+        assert orch_chunk is not None
+        assert "validate" in orch_chunk.calls
+        assert "transform" in orch_chunk.calls
+        assert "format" in orch_chunk.calls
+
+    def test_calls_included_in_payload(self):
+        """Verify calls appear in to_payload() output."""
+        chunk = Chunk(
+            repo_name="r",
+            domain_context="general",
+            document_type="code",
+            file_path="a.py",
+            entity_name="fn",
+            content="def fn(): pass",
+            calls=["bar", "baz"],
+        )
+        payload = chunk.to_payload()
+        assert payload["calls"] == ["bar", "baz"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Unit-level: Revision provenance
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestRevisionProvenance:
+    """Verify provenance metadata on Chunk dataclass and payload."""
+
+    def test_chunk_default_provenance_empty(self):
+        chunk = Chunk(
+            repo_name="r",
+            domain_context="general",
+            document_type="code",
+            file_path="a.py",
+            entity_name="fn",
+            content="def fn(): pass",
+        )
+        assert chunk.commit_sha == ""
+        assert chunk.git_ref == ""
+        assert chunk.environment == ""
+        assert chunk.build_id == ""
+        assert chunk.artifact_digest == ""
+
+    def test_provenance_in_payload(self):
+        chunk = Chunk(
+            repo_name="r",
+            domain_context="general",
+            document_type="code",
+            file_path="a.py",
+            entity_name="fn",
+            content="def fn(): pass",
+            commit_sha="abc123",
+            git_ref="v1.0.0",
+            environment="production",
+            build_id="build-42",
+            artifact_digest="sha256:deadbeef",
+        )
+        payload = chunk.to_payload()
+        assert payload["commit_sha"] == "abc123"
+        assert payload["git_ref"] == "v1.0.0"
+        assert payload["environment"] == "production"
+        assert payload["build_id"] == "build-42"
+        assert payload["artifact_digest"] == "sha256:deadbeef"
+
+    def test_apply_provenance_stamps_all_chunks(self):
+        chunks = [
+            Chunk(
+                repo_name="r",
+                domain_context="general",
+                document_type="code",
+                file_path="a.py",
+                entity_name="fn1",
+                content="def fn1(): pass",
+            ),
+            Chunk(
+                repo_name="r",
+                domain_context="general",
+                document_type="code",
+                file_path="b.py",
+                entity_name="fn2",
+                content="def fn2(): pass",
+            ),
+        ]
+        _apply_provenance(
+            chunks,
+            commit_sha="abc123",
+            git_ref="main",
+            environment="staging",
+        )
+        for c in chunks:
+            assert c.commit_sha == "abc123"
+            assert c.git_ref == "main"
+            assert c.environment == "staging"
+
+    def test_deterministic_id_includes_provenance(self):
+        """Same content at different revisions should produce different IDs."""
+        base_kwargs = dict(
+            repo_name="r",
+            domain_context="general",
+            document_type="code",
+            file_path="a.py",
+            entity_name="fn",
+            content="def fn(): pass",
+        )
+        c1 = Chunk(**base_kwargs, commit_sha="aaa", git_ref="v1.0", environment="prod")
+        c2 = Chunk(**base_kwargs, commit_sha="bbb", git_ref="v2.0", environment="prod")
+        c3 = Chunk(**base_kwargs, commit_sha="aaa", git_ref="v1.0", environment="prod")
+        assert c1.deterministic_id() != c2.deterministic_id()
+        assert c1.deterministic_id() == c3.deterministic_id()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -353,6 +541,263 @@ class TestIngestionIntegration:
         # Should NOT have business_logic or infrastructure
         assert "business_logic" not in types_returned
         assert "infrastructure" not in types_returned
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Integration: Provenance metadata round-trip through Qdrant
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestProvenanceIntegration:
+    """Verify provenance metadata survives ingestion and is filterable."""
+
+    REPO_NAME = "provenance-test"
+
+    @pytest.fixture(autouse=True)
+    def _clean_collection(self, qdrant: QdrantClient):
+        try:
+            qdrant.delete_collection(COLLECTION_NAME)
+        except Exception:
+            pass
+        ensure_collection(qdrant)
+        yield
+        try:
+            qdrant.delete_collection(COLLECTION_NAME)
+        except Exception:
+            pass
+
+    def test_provenance_stored_and_retrievable(
+        self,
+        qdrant: QdrantClient,
+        embed_model: SentenceTransformer,
+        sample_repo: Path,
+    ):
+        """Chunks ingested with provenance should carry it in Qdrant payloads."""
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        chunks = list(walk_repo(sample_repo, self.REPO_NAME, "payments"))
+        _apply_provenance(
+            chunks,
+            commit_sha="a1b2c3d4e5f67890",
+            git_ref="v1.2.0",
+            environment="production",
+            build_id="ci-123",
+            artifact_digest="sha256:cafe",
+        )
+        upsert_chunks(qdrant, embed_model, chunks)
+
+        # Scroll all points and check provenance
+        all_points, _ = qdrant.scroll(
+            collection_name=COLLECTION_NAME,
+            limit=100,
+            with_payload=True,
+        )
+        assert len(all_points) > 0
+        for pt in all_points:
+            assert pt.payload["commit_sha"] == "a1b2c3d4e5f67890"
+            assert pt.payload["git_ref"] == "v1.2.0"
+            assert pt.payload["environment"] == "production"
+            assert pt.payload["build_id"] == "ci-123"
+            assert pt.payload["artifact_digest"] == "sha256:cafe"
+
+    def test_filter_by_environment(
+        self,
+        qdrant: QdrantClient,
+        embed_model: SentenceTransformer,
+        sample_repo: Path,
+    ):
+        """Qdrant should be able to filter chunks by environment."""
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        chunks = list(walk_repo(sample_repo, self.REPO_NAME, "payments"))
+
+        # Ingest half as production, half as staging
+        prod_chunks = chunks[: len(chunks) // 2]
+        stg_chunks = chunks[len(chunks) // 2 :]
+        _apply_provenance(prod_chunks, commit_sha="aaa", environment="production")
+        _apply_provenance(stg_chunks, commit_sha="bbb", environment="staging")
+
+        upsert_chunks(qdrant, embed_model, prod_chunks + stg_chunks)
+
+        vec = embed_model.encode("authentication login").tolist()
+        prod_results = qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            query=vec,
+            query_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="repo_name", match=MatchValue(value=self.REPO_NAME)
+                    ),
+                    FieldCondition(
+                        key="environment", match=MatchValue(value="production")
+                    ),
+                ]
+            ),
+            limit=50,
+            with_payload=True,
+        ).points
+
+        assert len(prod_results) > 0
+        assert all(
+            r.payload["environment"] == "production" for r in prod_results
+        )
+
+    def test_filter_by_git_ref(
+        self,
+        qdrant: QdrantClient,
+        embed_model: SentenceTransformer,
+        sample_repo: Path,
+    ):
+        """Qdrant should filter chunks by git_ref."""
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        chunks = list(walk_repo(sample_repo, self.REPO_NAME, "payments"))
+        _apply_provenance(chunks, commit_sha="abc", git_ref="v2.0.0")
+        upsert_chunks(qdrant, embed_model, chunks)
+
+        vec = embed_model.encode("authentication").tolist()
+        results = qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            query=vec,
+            query_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="repo_name", match=MatchValue(value=self.REPO_NAME)
+                    ),
+                    FieldCondition(
+                        key="git_ref", match=MatchValue(value="v2.0.0")
+                    ),
+                ]
+            ),
+            limit=10,
+            with_payload=True,
+        ).points
+
+        assert len(results) > 0
+        assert all(r.payload["git_ref"] == "v2.0.0" for r in results)
+
+    def test_multi_revision_isolation(
+        self,
+        qdrant: QdrantClient,
+        embed_model: SentenceTransformer,
+        sample_repo: Path,
+    ):
+        """Two revisions of the same repo should not bleed into each other's queries."""
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        chunks_v1 = list(walk_repo(sample_repo, self.REPO_NAME, "payments"))
+        _apply_provenance(chunks_v1, commit_sha="v1hash", git_ref="v1.0.0", environment="production")
+        upsert_chunks(qdrant, embed_model, chunks_v1)
+
+        chunks_v2 = list(walk_repo(sample_repo, self.REPO_NAME, "payments"))
+        _apply_provenance(chunks_v2, commit_sha="v2hash", git_ref="v2.0.0", environment="staging")
+        upsert_chunks(qdrant, embed_model, chunks_v2)
+
+        vec = embed_model.encode("authentication").tolist()
+
+        # Query v1 only
+        v1_results = qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            query=vec,
+            query_filter=Filter(
+                must=[
+                    FieldCondition(key="repo_name", match=MatchValue(value=self.REPO_NAME)),
+                    FieldCondition(key="git_ref", match=MatchValue(value="v1.0.0")),
+                ]
+            ),
+            limit=20,
+            with_payload=True,
+        ).points
+
+        assert len(v1_results) > 0
+        assert all(r.payload["git_ref"] == "v1.0.0" for r in v1_results)
+        assert all(r.payload["environment"] == "production" for r in v1_results)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Integration: Call-graph data round-trip through Qdrant
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestCallGraphIntegration:
+    """Verify call-graph lineage survives ingestion and is queryable."""
+
+    REPO_NAME = "callgraph-test"
+
+    @pytest.fixture(autouse=True)
+    def _clean_collection(self, qdrant: QdrantClient):
+        try:
+            qdrant.delete_collection(COLLECTION_NAME)
+        except Exception:
+            pass
+        ensure_collection(qdrant)
+        yield
+        try:
+            qdrant.delete_collection(COLLECTION_NAME)
+        except Exception:
+            pass
+
+    def test_calls_stored_in_qdrant_payload(
+        self,
+        qdrant: QdrantClient,
+        embed_model: SentenceTransformer,
+        sample_repo: Path,
+    ):
+        """Chunks with calls should carry them through to Qdrant."""
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        chunks = list(walk_repo(sample_repo, self.REPO_NAME, "payments"))
+        upsert_chunks(qdrant, embed_model, chunks)
+
+        # Find the UserService.register chunk (it calls hash_password, self.auth.login, _send_welcome_email)
+        all_points, _ = qdrant.scroll(
+            collection_name=COLLECTION_NAME,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key="repo_name", match=MatchValue(value=self.REPO_NAME)),
+                    FieldCondition(key="entity_name", match=MatchValue(value="UserService")),
+                ]
+            ),
+            limit=10,
+            with_payload=True,
+        )
+
+        # UserService is a class — it should have calls from its methods
+        if all_points:
+            calls = all_points[0].payload.get("calls", [])
+            assert isinstance(calls, list)
+            # Should contain at least hash_password or self.auth.login
+            assert len(calls) > 0
+
+    def test_find_callers_via_calls_filter(
+        self,
+        qdrant: QdrantClient,
+        embed_model: SentenceTransformer,
+        sample_repo: Path,
+    ):
+        """We can find callers of a function by filtering on the calls field."""
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        chunks = list(walk_repo(sample_repo, self.REPO_NAME, "payments"))
+        upsert_chunks(qdrant, embed_model, chunks)
+
+        # Find entities that call hash_password
+        callers, _ = qdrant.scroll(
+            collection_name=COLLECTION_NAME,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key="repo_name", match=MatchValue(value=self.REPO_NAME)),
+                    FieldCondition(key="calls", match=MatchValue(value="hash_password")),
+                ]
+            ),
+            limit=10,
+            with_payload=True,
+        )
+
+        assert len(callers) > 0
+        # The caller should be UserService (which calls hash_password in register)
+        caller_names = [p.payload["entity_name"] for p in callers]
+        assert any("UserService" in name or "register" in name for name in caller_names)
 
 
 class TestGrpcIntegration:
