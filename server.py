@@ -6,7 +6,7 @@ Prometheus telemetry (/metrics) and healthcheck (/healthz) endpoints.
 
 Each tool:
   1. Encodes the incoming query with `all-MiniLM-L6-v2` (384-d).
-  2. Searches the Qdrant `propr_knowledge_base` collection with strict
+  2. Searches the Qdrant `contextcore_knowledge_base` collection with strict
      metadata filters, including optional revision provenance filters.
   3. Returns the top-k matching chunks as structured results with
      commit SHA, git ref, environment, and call-graph lineage.
@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-COLLECTION_NAME = os.getenv("COLLECTION_NAME", "propr_knowledge_base")
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "contextcore_knowledge_base")
 TOP_K = 10
 
 # ---------------------------------------------------------------------------
@@ -71,8 +71,23 @@ QDRANT_GRPC_PORT = int(os.getenv("QDRANT_GRPC_PORT", "6334"))
 QDRANT_PREFER_GRPC = os.getenv("QDRANT_PREFER_GRPC", "false").lower() in ("true", "1", "yes")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
-logger.info("Loading embedding model (all-MiniLM-L6-v2) …")
+logger.info("Loading text embedding model (all-MiniLM-L6-v2) …")
 _model = SentenceTransformer("all-MiniLM-L6-v2")
+
+DUAL_EMBEDDING_ENABLED = os.getenv("DUAL_EMBEDDING", "false").lower() in ("true", "1", "yes")
+
+_code_tokenizer: Any = None
+_code_model: Any = None
+if DUAL_EMBEDDING_ENABLED:
+    try:
+        logger.info("Loading code embedding model (microsoft/unixcoder-base) …")
+        from transformers import AutoModel, AutoTokenizer
+        _code_tokenizer = AutoTokenizer.from_pretrained("microsoft/unixcoder-base")
+        _code_model = AutoModel.from_pretrained("microsoft/unixcoder-base")
+        _code_model.eval()
+        logger.info("Loaded code embedding model (microsoft/unixcoder-base).")
+    except Exception as exc:
+        logger.warning("Could not load code model (microsoft/unixcoder-base): %s", exc)
 
 if QDRANT_URL:
     logger.info("Connecting to Qdrant at %s (prefer_grpc=%s) …", QDRANT_URL, QDRANT_PREFER_GRPC)
@@ -94,16 +109,28 @@ else:
     )
 
 
-def ensure_collection(client: QdrantClient, collection_name: str = COLLECTION_NAME) -> None:
+def ensure_collection(
+    client: QdrantClient,
+    collection_name: str = COLLECTION_NAME,
+    dual_embedding: bool = DUAL_EMBEDDING_ENABLED,
+) -> None:
     """Ensure the target Qdrant collection exists before queries run."""
     try:
         collections = [c.name for c in client.get_collections().collections]
         if collection_name not in collections:
+            if dual_embedding:
+                vectors_config: Any = {
+                    "text": VectorParams(size=384, distance=Distance.COSINE),
+                    "code": VectorParams(size=768, distance=Distance.COSINE),
+                }
+            else:
+                vectors_config = VectorParams(size=384, distance=Distance.COSINE)
+
             client.create_collection(
                 collection_name=collection_name,
-                vectors_config=VectorParams(size=384, distance=Distance.COSINE),
+                vectors_config=vectors_config,
             )
-            logger.info("Created collection '%s'.", collection_name)
+            logger.info("Created collection '%s' (dual_embedding=%s).", collection_name, dual_embedding)
     except Exception as exc:
         logger.warning("Could not auto-create collection '%s': %s", collection_name, exc)
 
@@ -163,6 +190,44 @@ def _embed(text: str) -> list[float]:
     return vec
 
 
+@functools.lru_cache(maxsize=int(os.getenv("EMBEDDING_CACHE_SIZE", "2048")))
+def _raw_embed_code(code: str) -> tuple[float, ...] | None:
+    """Encode code query using UniXcoder into a 768-d normalized vector."""
+    if _code_model is None or _code_tokenizer is None:
+        return None
+    import torch
+
+    with EMBEDDING_DURATION_SECONDS.time():
+        inputs = _code_tokenizer(
+            code,
+            return_tensors="pt",
+            max_length=512,
+            truncation=True,
+            padding=True,
+        )
+        with torch.no_grad():
+            outputs = _code_model(**inputs)
+            embeddings = outputs.last_hidden_state.mean(dim=1)
+            normalized = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+        return tuple(normalized[0].tolist())
+
+
+def _embed_code(code: str) -> list[float] | None:
+    """Encode code query with UniXcoder LRU cache, returning 768-d list or None."""
+    res = _raw_embed_code(code)
+    return list(res) if res is not None else None
+
+
+@functools.lru_cache(maxsize=64)
+def _collection_uses_named_vectors(collection_name: str = COLLECTION_NAME) -> bool:
+    """Check whether Qdrant collection is configured with named vectors."""
+    try:
+        col_info = _qdrant.get_collection(collection_name)
+        return isinstance(col_info.config.params.vectors, dict)
+    except Exception:
+        return False
+
+
 def _search(
     query_vector: list[float],
     must_conditions: list[FieldCondition],
@@ -172,12 +237,15 @@ def _search(
     tool_name: str = "search",
     target_revision: str | None = None,
     target_environment: str | None = None,
+    vector_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """Run a Qdrant search with the supplied filter conditions and latency tracking.
 
     When *target_revision* is set, an OR filter is appended so that results
     match either ``git_ref`` or ``commit_sha``.  When *target_environment* is
     set, results are restricted to that deployment tier.
+    When the collection uses named vectors, *vector_name* specifies which vector
+    index to search ('text' or 'code').
     """
     all_must = list(must_conditions)
 
@@ -219,6 +287,11 @@ def _search(
     }
     if score_threshold is not None:
         query_kwargs["score_threshold"] = score_threshold
+
+    # If the collection uses named vectors, provide the target vector name
+    if _collection_uses_named_vectors(COLLECTION_NAME):
+        target_using = vector_name or "text"
+        query_kwargs["using"] = target_using
 
     try:
         with QDRANT_QUERY_DURATION_SECONDS.labels(tool_name=tool_name).time():
@@ -402,7 +475,17 @@ def get_implementation_ast(
         "get_implementation_ast(issue=%r, repo=%r, rev=%s, env=%s)",
         issue_description, repo_name, target_revision, target_environment,
     )
-    vec = _embed(issue_description)
+    # Check if dual embedding / named vector 'code' is available
+    use_code_vector = _collection_uses_named_vectors(COLLECTION_NAME)
+    code_vec = _embed_code(issue_description) if use_code_vector else None
+
+    if use_code_vector and code_vec is not None:
+        vec = code_vec
+        target_vname = "code"
+    else:
+        vec = _embed(issue_description)
+        target_vname = "text"
+
     results = _search(
         query_vector=vec,
         must_conditions=[
@@ -412,6 +495,7 @@ def get_implementation_ast(
         tool_name="get_implementation_ast",
         target_revision=target_revision,
         target_environment=target_environment,
+        vector_name=target_vname,
     )
     return _format_results(results)
 
@@ -440,7 +524,16 @@ def get_testing_context(
             (e.g. 'production', 'staging').
     """
     logger.info("get_testing_context(repo=%r, rev=%s, env=%s)", repo_name, target_revision, target_environment)
-    vec = _embed(modified_code)
+    # Check if dual embedding / named vector 'code' is available
+    use_code_vector = _collection_uses_named_vectors(COLLECTION_NAME)
+    code_vec = _embed_code(modified_code) if use_code_vector else None
+
+    if use_code_vector and code_vec is not None:
+        vec = code_vec
+        using_vname: str | None = "code"
+    else:
+        vec = _embed(modified_code)
+        using_vname = "text" if use_code_vector else None
 
     # Build conditions
     must_conds = [
@@ -466,20 +559,24 @@ def get_testing_context(
             FieldCondition(key="commit_sha", match=MatchValue(value=target_revision)),
         ])
 
+    query_kwargs: dict[str, Any] = {
+        "collection_name": COLLECTION_NAME,
+        "query": vec,
+        "query_filter": Filter(
+            must=must_conds,
+            should=should_conds,
+        ),
+        "limit": TOP_K,
+        "search_params": SearchParams(exact=False, hnsw_ef=128),
+        "with_payload": True,
+    }
+    if using_vname:
+        query_kwargs["using"] = using_vname
+
     with QDRANT_QUERY_DURATION_SECONDS.labels(
         tool_name="get_testing_context"
     ).time():
-        response = _qdrant.query_points(
-            collection_name=COLLECTION_NAME,
-            query=vec,
-            query_filter=Filter(
-                must=must_conds,
-                should=should_conds,
-            ),
-            limit=TOP_K,
-            search_params=SearchParams(exact=False, hnsw_ef=128),
-            with_payload=True,
-        )
+        response = _qdrant.query_points(**query_kwargs)
 
     formatted = [
         {

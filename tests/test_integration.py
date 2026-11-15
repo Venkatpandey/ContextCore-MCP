@@ -854,3 +854,92 @@ class TestGrpcIntegration:
         ).points
         assert len(results) > 0
         assert results[0].payload["repo_name"] == "grpc-repo"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Integration: Dual-Embedding (Named Vectors: 'text' + 'code')
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestDualEmbeddingIntegration:
+    """Verify named vector dual embedding (MiniLM-L6 + UniXcoder) in Qdrant."""
+
+    DUAL_COLLECTION = "test_dual_embedding_collection"
+
+    @pytest.fixture(autouse=True)
+    def _clean_collection(self, qdrant: QdrantClient):
+        try:
+            qdrant.delete_collection(self.DUAL_COLLECTION)
+        except Exception:
+            pass
+        yield
+        try:
+            qdrant.delete_collection(self.DUAL_COLLECTION)
+        except Exception:
+            pass
+
+    def test_dual_embedding_ensure_and_upsert(
+        self,
+        qdrant: QdrantClient,
+        embed_model: SentenceTransformer,
+        sample_repo: Path,
+    ):
+        """Verify that ensure_collection creates named vectors ('text' + 'code') and upserts both."""
+        from transformers import AutoModel, AutoTokenizer
+        from ingest import ensure_collection, upsert_chunks, walk_repo
+
+        # 1. Ensure collection with dual_embedding=True
+        ensure_collection(qdrant, collection_name=self.DUAL_COLLECTION, dual_embedding=True)
+        col_info = qdrant.get_collection(self.DUAL_COLLECTION)
+        assert isinstance(col_info.config.params.vectors, dict)
+        assert "text" in col_info.config.params.vectors
+        assert "code" in col_info.config.params.vectors
+        assert col_info.config.params.vectors["text"].size == 384
+        assert col_info.config.params.vectors["code"].size == 768
+
+        # 2. Load code model and tokenizer
+        code_tokenizer = AutoTokenizer.from_pretrained("microsoft/unixcoder-base")
+        code_model = AutoModel.from_pretrained("microsoft/unixcoder-base")
+        code_model.eval()
+
+        # 3. Upsert chunks
+        chunks = list(walk_repo(sample_repo, "dual-repo", "payments"))
+        count = upsert_chunks(
+            qdrant,
+            embed_model,
+            chunks,
+            collection_name=self.DUAL_COLLECTION,
+            code_model=code_model,
+            code_tokenizer=code_tokenizer,
+        )
+        assert count == len(chunks)
+
+        # 4. Query using 'text' vector (384-d)
+        text_query = embed_model.encode("user login authentication").tolist()
+        text_results = qdrant.query_points(
+            collection_name=self.DUAL_COLLECTION,
+            query=text_query,
+            using="text",
+            limit=5,
+            with_payload=True,
+        ).points
+        assert len(text_results) > 0
+
+        # 5. Query using 'code' vector (768-d from UniXcoder)
+        import torch
+        inputs = code_tokenizer("def login(username, password):", return_tensors="pt")
+        with torch.no_grad():
+            outputs = code_model(**inputs)
+            code_emb = torch.nn.functional.normalize(outputs.last_hidden_state.mean(dim=1), p=2, dim=1)
+        code_vec = code_emb[0].tolist()
+
+        code_results = qdrant.query_points(
+            collection_name=self.DUAL_COLLECTION,
+            query=code_vec,
+            using="code",
+            limit=5,
+            with_payload=True,
+        ).points
+        assert len(code_results) > 0
+        assert any("auth" in r.payload["file_path"].lower() for r in code_results)
+

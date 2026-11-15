@@ -11,7 +11,7 @@ into a Qdrant vector database.
 - Markdown documents (.md) are split by H1/H2 headers with contextual
   chunk headers prepended.
 - Each chunk is embedded with `all-MiniLM-L6-v2` (384-d) and upserted
-  into the `propr_knowledge_base` collection in Qdrant.
+  into the `contextcore_knowledge_base` collection in Qdrant.
 - Revision provenance (commit_sha, git_ref, environment, build_id,
   artifact_digest) is attached to every chunk payload for deployment-aware
   retrieval.
@@ -29,7 +29,7 @@ import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Generator
+from typing import Any, Generator
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -61,9 +61,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-COLLECTION_NAME = os.getenv("COLLECTION_NAME", "propr_knowledge_base")
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "contextcore_knowledge_base")
 EMBEDDING_DIM = 384
+CODE_EMBEDDING_DIM = 768
 BATCH_SIZE = 100
+
+# Dual embedding flag (all-MiniLM-L6-v2 + microsoft/unixcoder-base).
+# Defaults to False for lightweight execution, can be enabled via DUAL_EMBEDDING=true or CLI --dual-embedding
+DUAL_EMBEDDING_ENABLED = os.getenv("DUAL_EMBEDDING", "false").lower() in ("true", "1", "yes")
 
 # Map file extensions → tree-sitter language names
 TS_LANGUAGE_MAP: dict[str, str] = {
@@ -597,20 +602,59 @@ def walk_repo(
 # Qdrant helpers
 # ---------------------------------------------------------------------------
 
-def ensure_collection(client: QdrantClient, collection_name: str = COLLECTION_NAME) -> None:
-    """Create the collection if it doesn't already exist."""
+def ensure_collection(
+    client: QdrantClient,
+    collection_name: str = COLLECTION_NAME,
+    dual_embedding: bool = DUAL_EMBEDDING_ENABLED,
+) -> None:
+    """Create the collection if it doesn't already exist.
+
+    When *dual_embedding* is True, the collection is configured with named vectors:
+      - 'text': 384-d vector (all-MiniLM-L6-v2) for NL and markdown queries.
+      - 'code': 768-d vector (microsoft/unixcoder-base) for AST code syntax matching.
+    When False, a single unnamed 384-d vector is used.
+    """
     collections = [c.name for c in client.get_collections().collections]
     if collection_name in collections:
         logger.info("Collection '%s' already exists — skipping creation.", collection_name)
         return
+
+    if dual_embedding:
+        vectors_config: Any = {
+            "text": VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
+            "code": VectorParams(size=CODE_EMBEDDING_DIM, distance=Distance.COSINE),
+        }
+    else:
+        vectors_config = VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE)
+
     client.create_collection(
         collection_name=collection_name,
-        vectors_config=VectorParams(
-            size=EMBEDDING_DIM,
-            distance=Distance.COSINE,
-        ),
+        vectors_config=vectors_config,
     )
-    logger.info("Created collection '%s'.", collection_name)
+    logger.info("Created collection '%s' (dual_embedding=%s).", collection_name, dual_embedding)
+
+
+def _encode_unixcoder_batch(
+    code_model: Any,
+    code_tokenizer: Any,
+    texts: list[str],
+    device: str = "cpu",
+) -> list[list[float]]:
+    """Encode a batch of code snippets using UniXcoder into normalized 768-d vectors."""
+    import torch
+
+    inputs = code_tokenizer(
+        texts,
+        return_tensors="pt",
+        max_length=512,
+        truncation=True,
+        padding=True,
+    ).to(device)
+    with torch.no_grad():
+        outputs = code_model(**inputs)
+        embeddings = outputs.last_hidden_state.mean(dim=1)
+        normalized = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+    return normalized.cpu().tolist()
 
 
 def upsert_chunks(
@@ -618,25 +662,54 @@ def upsert_chunks(
     model: SentenceTransformer,
     chunks: list[Chunk],
     collection_name: str = COLLECTION_NAME,
+    code_model: Any = None,
+    code_tokenizer: Any = None,
 ) -> int:
-    """Embed and upsert a list of chunks into Qdrant in batches. Returns count."""
+    """Embed and upsert a list of chunks into Qdrant in batches. Returns count.
+
+    Supports both single-vector collections and dual-embedding named-vector
+    collections ('text' and 'code').
+    """
     if not chunks:
         return 0
+
+    # Inspect collection to see if it uses named vectors
+    col_info = client.get_collection(collection_name)
+    is_named_vectors = isinstance(col_info.config.params.vectors, dict)
 
     total = 0
     for i in range(0, len(chunks), BATCH_SIZE):
         batch = chunks[i: i + BATCH_SIZE]
         texts = [c.content for c in batch]
-        embeddings = model.encode(texts, show_progress_bar=False).tolist()
+        text_embeddings = model.encode(texts, show_progress_bar=False).tolist()
 
-        points = [
-            PointStruct(
-                id=chunk.deterministic_id(),
-                vector=emb,
-                payload=chunk.to_payload(),
-            )
-            for chunk, emb in zip(batch, embeddings)
-        ]
+        # If named vectors are enabled and code model is provided, compute code embeddings
+        code_embeddings: list[list[float]] | None = None
+        if is_named_vectors and code_model is not None and code_tokenizer is not None:
+            code_embeddings = _encode_unixcoder_batch(code_model, code_tokenizer, texts)
+
+        points = []
+        for idx, (chunk, text_emb) in enumerate(zip(batch, text_embeddings)):
+            if is_named_vectors:
+                point_vector: dict[str, list[float]] = {"text": text_emb}
+                if code_embeddings is not None:
+                    point_vector["code"] = code_embeddings[idx]
+                points.append(
+                    PointStruct(
+                        id=chunk.deterministic_id(),
+                        vector=point_vector,
+                        payload=chunk.to_payload(),
+                    )
+                )
+            else:
+                points.append(
+                    PointStruct(
+                        id=chunk.deterministic_id(),
+                        vector=text_emb,
+                        payload=chunk.to_payload(),
+                    )
+                )
+
         with INGEST_BATCH_DURATION_SECONDS.time():
             client.upsert(collection_name=collection_name, points=points)
 
@@ -754,6 +827,18 @@ def main() -> None:
         help="Container image digest or artifact hash.",
     )
     parser.add_argument(
+        "--dual-embedding",
+        action="store_true",
+        default=DUAL_EMBEDDING_ENABLED,
+        help="Generate dual embeddings using text (MiniLM-L6) and code (UniXcoder) models. Default: True.",
+    )
+    parser.add_argument(
+        "--no-dual-embedding",
+        action="store_false",
+        dest="dual_embedding",
+        help="Disable dual embedding and use single text vector only.",
+    )
+    parser.add_argument(
         "--qdrant-url",
         type=str,
         default=os.getenv("QDRANT_URL"),
@@ -806,8 +891,17 @@ def main() -> None:
     if args.environment:
         logger.info("Revision provenance: environment=%s", args.environment)
 
-    logger.info("Loading embedding model (all-MiniLM-L6-v2) …")
+    logger.info("Loading text embedding model (all-MiniLM-L6-v2) …")
     model = SentenceTransformer("all-MiniLM-L6-v2")
+
+    code_model: Any = None
+    code_tokenizer: Any = None
+    if args.dual_embedding:
+        logger.info("Loading code embedding model (microsoft/unixcoder-base) …")
+        from transformers import AutoModel, AutoTokenizer
+        code_tokenizer = AutoTokenizer.from_pretrained("microsoft/unixcoder-base")
+        code_model = AutoModel.from_pretrained("microsoft/unixcoder-base")
+        code_model.eval()
 
     if args.qdrant_url:
         logger.info("Connecting to Qdrant at %s (prefer_grpc=%s) …", args.qdrant_url, args.prefer_grpc)
@@ -828,7 +922,7 @@ def main() -> None:
             api_key=args.qdrant_api_key,
         )
 
-    ensure_collection(client, collection_name=args.collection)
+    ensure_collection(client, collection_name=args.collection, dual_embedding=args.dual_embedding)
 
     logger.info("Walking %s (repo=%s, domain=%s) …", target, args.repo_name, args.domain_context)
     all_chunks: list[Chunk] = list(walk_repo(target, args.repo_name, args.domain_context))
@@ -848,7 +942,14 @@ def main() -> None:
         artifact_digest=args.artifact_digest,
     )
 
-    count = upsert_chunks(client, model, all_chunks, collection_name=args.collection)
+    count = upsert_chunks(
+        client,
+        model,
+        all_chunks,
+        collection_name=args.collection,
+        code_model=code_model,
+        code_tokenizer=code_tokenizer,
+    )
     logger.info("✅  Ingestion complete — %d vectors upserted into '%s'.", count, args.collection)
 
 
