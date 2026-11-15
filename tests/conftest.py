@@ -15,7 +15,7 @@ from sentence_transformers import SentenceTransformer
 
 QDRANT_HOST = "localhost"
 QDRANT_PORT = 6333
-TEST_COLLECTION = "propr_knowledge_base"
+TEST_COLLECTION = "contextcore_knowledge_base"
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 

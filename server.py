@@ -6,7 +6,7 @@ Prometheus telemetry (/metrics) and healthcheck (/healthz) endpoints.
 
 Each tool:
   1. Encodes the incoming query with `all-MiniLM-L6-v2` (384-d).
-  2. Searches the Qdrant `propr_knowledge_base` collection with strict
+  2. Searches the Qdrant `contextcore_knowledge_base` collection with strict
      metadata filters, including optional revision provenance filters.
   3. Returns the top-k matching chunks as structured results with
      commit SHA, git ref, environment, and call-graph lineage.
@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-COLLECTION_NAME = os.getenv("COLLECTION_NAME", "propr_knowledge_base")
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "contextcore_knowledge_base")
 TOP_K = 10
 
 # ---------------------------------------------------------------------------
