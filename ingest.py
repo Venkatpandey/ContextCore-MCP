@@ -11,7 +11,7 @@ into a Qdrant vector database.
 - Markdown documents (.md) are split by H1/H2 headers with contextual
   chunk headers prepended.
 - Each chunk is embedded with `all-MiniLM-L6-v2` (384-d) and upserted
-  into the `propr_knowledge_base` collection in Qdrant.
+  into the `contextcore_knowledge_base` collection in Qdrant.
 - Revision provenance (commit_sha, git_ref, environment, build_id,
   artifact_digest) is attached to every chunk payload for deployment-aware
   retrieval.
@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-COLLECTION_NAME = os.getenv("COLLECTION_NAME", "propr_knowledge_base")
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "contextcore_knowledge_base")
 EMBEDDING_DIM = 384
 BATCH_SIZE = 100
 

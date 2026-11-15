@@ -66,7 +66,7 @@ jobs:
           QDRANT_HOST: ${{ secrets.QDRANT_HOST }}
           QDRANT_PORT: ${{ secrets.QDRANT_PORT || '6333' }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
-          COLLECTION_NAME: ${{ secrets.QDRANT_COLLECTION || 'propr_knowledge_base' }}
+          COLLECTION_NAME: ${{ secrets.QDRANT_COLLECTION || 'contextcore_knowledge_base' }}
           REPO_NAME: ${{ github.event.repository.name }}
           DOMAIN_CONTEXT: ${{ vars.DOMAIN_CONTEXT || 'engineering' }}
         run: |
