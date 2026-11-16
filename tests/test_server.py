@@ -221,15 +221,33 @@ class TestServerTools:
             "file_path": "a.py",
             "entity_name": "foo",
             "point_id": "point-1",
-            "content": "x" * 2000,
+            "content": "x" * 3000,
             "calls": [f"call{i}" for i in range(20)],
         }])
         assert "Point ID: point-1" in out
-        assert "x" * 500 in out
-        assert "x" * 501 not in out
+        assert "x" * 2000 in out
+        assert "x" * 2001 not in out
         assert "get_chunk" in out
         assert "call7 (+12 more)" in out
         assert "call8" not in out
+
+    def test_format_results_returns_complete_entity_without_truncation(self):
+        out = _format_results([{
+            "score": 0.95,
+            "repo_name": "r",
+            "document_type": "code",
+            "file_path": "a.py",
+            "entity_name": "foo",
+            "point_id": "point-1",
+            "content": "def foo():\n    return 42\n",
+            "calls": ["call1", "call2"],
+        }])
+        assert "Point ID: point-1" in out
+        assert "def foo():" in out
+        assert "return 42" in out
+        assert "Calls: call1, call2" in out
+        assert "Preview truncated" not in out
+        assert "get_chunk" not in out
 
     def test_get_chunk_reads_pages_with_repo_scope(self):
         results = _search(
@@ -409,6 +427,18 @@ class TestGetCallPath:
         """get_call_path should list callers section."""
         out = get_call_path("hash_password", self.REPO_NAME)
         assert "Callers of 'hash_password'" in out
+        assert "UserService.register" in out
+
+    def test_call_path_qualified_method_and_leaf_resolution(self):
+        """get_call_path should resolve both qualified and leaf queries."""
+        # 1. Qualified method name
+        reg_out = get_call_path("UserService.register", self.REPO_NAME)
+        assert "Callees of 'UserService.register'" in reg_out
+        assert "hash_password" in reg_out
+
+        # 2. Leaf name resolution for login should find UserService.register as caller
+        login_out = get_call_path("login", self.REPO_NAME)
+        assert "UserService.register" in login_out
 
     def test_call_path_unknown_entity(self):
         """get_call_path for a non-existent entity should report not found."""

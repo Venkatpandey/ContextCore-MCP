@@ -156,6 +156,32 @@ ENTITY_NODE_TYPES: dict[str, set[str]] = {
     },
 }
 
+# Container types that house methods/functions and can be broken down into
+# granular method chunks + high-level interface outline chunks.
+CONTAINER_NODE_TYPES: dict[str, set[str]] = {
+    "python": {"class_definition"},
+    "typescript": {"class_declaration", "interface_declaration"},
+    "tsx": {"class_declaration", "interface_declaration"},
+    "javascript": {"class_declaration"},
+    "java": {"class_declaration", "interface_declaration", "enum_declaration"},
+    "rust": {"impl_item", "trait_item"},
+    "scala": {"class_definition", "trait_definition", "object_definition"},
+    "kotlin": {"class_declaration", "object_declaration"},
+}
+
+# Method / member function node types inside containers.
+METHOD_NODE_TYPES: dict[str, set[str]] = {
+    "python": {"function_definition", "decorated_definition"},
+    "typescript": {"method_definition"},
+    "tsx": {"method_definition"},
+    "javascript": {"method_definition"},
+    "java": {"method_declaration", "constructor_declaration"},
+    "rust": {"function_item"},
+    "scala": {"function_definition"},
+    "kotlin": {"function_declaration"},
+    "go": {"method_declaration"},
+}
+
 # Infrastructure file patterns
 INFRA_PATTERNS: set[str] = {
     "Dockerfile",
@@ -291,12 +317,72 @@ def _classify_code_file(rel_path: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# AST-based code chunking
+# AST-based code chunking & Outline generation
 # ---------------------------------------------------------------------------
+
+def _extract_go_receiver_type(recv_node, source_bytes: bytes) -> str | None:
+    """Extract receiver type name from a Go method receiver node."""
+    for ch in recv_node.children:
+        if ch.type == "parameter_declaration":
+            for sub in ch.children:
+                if sub.type == "pointer_type":
+                    for t in sub.children:
+                        if t.type == "type_identifier":
+                            return source_bytes[t.start_byte: t.end_byte].decode("utf-8", errors="replace")
+                elif sub.type == "type_identifier":
+                    return source_bytes[sub.start_byte: sub.end_byte].decode("utf-8", errors="replace")
+    return None
+
 
 def _extract_entity_name(node, source_bytes: bytes, lang: str) -> str:
     """Best-effort extraction of the entity name from a tree-sitter node."""
-    # Most languages have a `name` child of type `identifier`
+    # Special handling for Go method_declaration: extract Receiver.MethodName
+    if lang == "go" and node.type == "method_declaration":
+        name_node = node.child_by_field_name("name")
+        m_name = (
+            source_bytes[name_node.start_byte: name_node.end_byte].decode("utf-8", errors="replace")
+            if name_node
+            else None
+        )
+        recv_node = node.child_by_field_name("receiver")
+        recv_type = _extract_go_receiver_type(recv_node, source_bytes) if recv_node else None
+        if m_name and recv_type:
+            return f"{recv_type}.{m_name}"
+        if m_name:
+            return m_name
+
+    # Rust impl_item has 'type' child rather than 'name'
+    if lang == "rust" and node.type == "impl_item":
+        type_node = node.child_by_field_name("type")
+        if type_node:
+            return source_bytes[type_node.start_byte: type_node.end_byte].decode("utf-8", errors="replace")
+
+    # For decorated definitions (Python), recurse into the inner definition
+    if node.type == "decorated_definition":
+        for child in node.children:
+            if (
+                child.type in ENTITY_NODE_TYPES.get(lang, set())
+                or child.type in CONTAINER_NODE_TYPES.get(lang, set())
+                or child.type in METHOD_NODE_TYPES.get(lang, set())
+            ):
+                return _extract_entity_name(child, source_bytes, lang)
+
+    # For export_statement, look at the declaration child
+    if node.type == "export_statement":
+        for child in node.children:
+            if (
+                "declaration" in child.type
+                or child.type in CONTAINER_NODE_TYPES.get(lang, set())
+                or child.type in ENTITY_NODE_TYPES.get(lang, set())
+            ):
+                return _extract_entity_name(child, source_bytes, lang)
+
+    # Use tree-sitter field 'name' if present (most accurate across grammars)
+    name_node = node.child_by_field_name("name")
+    if name_node is not None:
+        return source_bytes[name_node.start_byte: name_node.end_byte].decode("utf-8", errors="replace")
+
+    # Fallback: inspect direct children for identifier types
     for child in node.children:
         if child.type in ("identifier", "type_identifier", "property_identifier") or (
             lang == "bash" and child.type == "word"
@@ -304,17 +390,152 @@ def _extract_entity_name(node, source_bytes: bytes, lang: str) -> str:
             return source_bytes[child.start_byte: child.end_byte].decode(
                 "utf-8", errors="replace"
             )
-    # For decorated definitions (Python), recurse into the inner definition
-    if node.type == "decorated_definition":
-        for child in node.children:
-            if child.type in ENTITY_NODE_TYPES.get(lang, set()):
-                return _extract_entity_name(child, source_bytes, lang)
-    # For export_statement, look at the declaration child
-    if node.type == "export_statement":
-        for child in node.children:
-            if "declaration" in child.type:
-                return _extract_entity_name(child, source_bytes, lang)
+
     return "<anonymous>"
+
+
+def _build_python_class_outline(node, source_bytes: bytes) -> str:
+    """Build a concise interface outline for a large Python class."""
+    block_node = None
+    for child in node.children:
+        if child.type == "block":
+            block_node = child
+            break
+    if block_node is None:
+        return source_bytes[node.start_byte: node.end_byte].decode("utf-8", errors="replace")
+
+    header = source_bytes[node.start_byte: block_node.start_byte].decode("utf-8", errors="replace").strip()
+    lines: list[str] = [header]
+
+    for stmt in block_node.children:
+        if stmt.type == "expression_statement":
+            text = source_bytes[stmt.start_byte: stmt.end_byte].decode("utf-8", errors="replace").strip()
+            if text.startswith(('"""', "'''", '"', "'")):
+                lines.append(f"    {text}")
+        elif stmt.type in ("function_definition", "decorated_definition"):
+            target = stmt
+            if target.type == "decorated_definition":
+                for ch in target.children:
+                    if ch.type == "function_definition":
+                        target = ch
+                        break
+            sig = ""
+            for ch in target.children:
+                if ch.type == "block":
+                    sig = source_bytes[target.start_byte: ch.start_byte].decode("utf-8", errors="replace").strip()
+                    break
+            if sig:
+                lines.append(f"    {sig} ...")
+            else:
+                lines.append(f"    {source_bytes[stmt.start_byte: stmt.end_byte].decode('utf-8', errors='replace').strip()}")
+    return "\n".join(lines)
+
+
+def _build_ts_class_outline(node, source_bytes: bytes) -> str:
+    """Build a concise interface outline for a TypeScript / JavaScript class."""
+    body_node = None
+    for child in node.children:
+        if child.type == "class_body":
+            body_node = child
+            break
+    if body_node is None:
+        return source_bytes[node.start_byte: node.end_byte].decode("utf-8", errors="replace")
+
+    header = source_bytes[node.start_byte: body_node.start_byte].decode("utf-8", errors="replace").strip()
+    lines: list[str] = [f"{header} {{"]
+
+    for member in body_node.children:
+        if member.type == "method_definition":
+            sig = ""
+            for ch in member.children:
+                if ch.type == "statement_block":
+                    sig = source_bytes[member.start_byte: ch.start_byte].decode("utf-8", errors="replace").strip()
+                    break
+            if sig:
+                lines.append(f"    {sig};")
+            else:
+                lines.append(f"    {source_bytes[member.start_byte: member.end_byte].decode('utf-8', errors='replace').strip()}")
+        elif member.type in ("public_field_definition", "field_definition", "property_definition"):
+            text = source_bytes[member.start_byte: member.end_byte].decode("utf-8", errors="replace").strip()
+            lines.append(f"    {text}")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _build_java_class_outline(node, source_bytes: bytes) -> str:
+    """Build a concise interface outline for a Java class."""
+    body_node = None
+    for child in node.children:
+        if child.type == "class_body":
+            body_node = child
+            break
+    if body_node is None:
+        return source_bytes[node.start_byte: node.end_byte].decode("utf-8", errors="replace")
+
+    header = source_bytes[node.start_byte: body_node.start_byte].decode("utf-8", errors="replace").strip()
+    lines: list[str] = [f"{header} {{"]
+
+    for member in body_node.children:
+        if member.type in ("method_declaration", "constructor_declaration"):
+            sig = ""
+            for ch in member.children:
+                if ch.type in ("block", "constructor_body"):
+                    sig = source_bytes[member.start_byte: ch.start_byte].decode("utf-8", errors="replace").strip()
+                    break
+            if sig:
+                lines.append(f"    {sig};")
+            else:
+                lines.append(f"    {source_bytes[member.start_byte: member.end_byte].decode('utf-8', errors='replace').strip()}")
+        elif member.type == "field_declaration":
+            text = source_bytes[member.start_byte: member.end_byte].decode("utf-8", errors="replace").strip()
+            lines.append(f"    {text}")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _build_rust_impl_outline(node, source_bytes: bytes) -> str:
+    """Build a concise interface outline for a Rust impl or trait block."""
+    body_node = None
+    for child in node.children:
+        if child.type == "declaration_list":
+            body_node = child
+            break
+    if body_node is None:
+        return source_bytes[node.start_byte: node.end_byte].decode("utf-8", errors="replace")
+
+    header = source_bytes[node.start_byte: body_node.start_byte].decode("utf-8", errors="replace").strip()
+    lines: list[str] = [f"{header} {{"]
+
+    for member in body_node.children:
+        if member.type == "function_item":
+            sig = ""
+            for ch in member.children:
+                if ch.type == "block":
+                    sig = source_bytes[member.start_byte: ch.start_byte].decode("utf-8", errors="replace").strip()
+                    break
+            if sig:
+                lines.append(f"    {sig};")
+            else:
+                lines.append(f"    {source_bytes[member.start_byte: member.end_byte].decode('utf-8', errors='replace').strip()}")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _build_container_outline(node, source_bytes: bytes, lang: str) -> str:
+    """Generate a clean outline summary for large classes/containers."""
+    if lang == "python":
+        return _build_python_class_outline(node, source_bytes)
+    if lang in ("typescript", "tsx", "javascript"):
+        return _build_ts_class_outline(node, source_bytes)
+    if lang == "java":
+        return _build_java_class_outline(node, source_bytes)
+    if lang == "rust":
+        return _build_rust_impl_outline(node, source_bytes)
+
+    full = source_bytes[node.start_byte: node.end_byte].decode("utf-8", errors="replace")
+    if len(full) > 1500:
+        return full[:1500] + "\n// ... [Outline truncated for embedding efficiency] ..."
+    return full
 
 
 # ---------------------------------------------------------------------------
@@ -333,16 +554,27 @@ _CALL_NODE_TYPES: set[str] = {
 def _extract_calls(node, source_bytes: bytes) -> list[str]:
     """Walk *node*'s subtree and return deduplicated callee names.
 
-    For ``foo()``, ``self.bar()``, ``obj.method()``, and ``Module.func()``
-    we capture the trailing identifier (or dotted path).  Duplicates within
-    the same entity are collapsed and order is preserved.
+    Captures both qualified paths (e.g. ``self.auth.login``, ``db.find``)
+    and leaf names (e.g. ``login``, ``find``) so that call-path searches by
+    either short or full name resolve accurately.
     """
     seen: set[str] = set()
     result: list[str] = []
 
+    def _add_call(name: str | None) -> None:
+        if not name:
+            return
+        if name not in seen:
+            seen.add(name)
+            result.append(name)
+        if "." in name:
+            leaf = name.split(".")[-1]
+            if leaf and leaf not in seen:
+                seen.add(leaf)
+                result.append(leaf)
+
     def _callee_name(call_node) -> str | None:
         """Return the best-effort callee name from a call node."""
-        # call_expression / call: first child is the function reference
         fn = call_node.children[0] if call_node.children else None
         if fn is None:
             return None
@@ -374,9 +606,7 @@ def _extract_calls(node, source_bytes: bytes) -> list[str]:
     def _walk(n) -> None:
         if n.type in _CALL_NODE_TYPES:
             name = _callee_name(n)
-            if name and name not in seen:
-                seen.add(name)
-                result.append(name)
+            _add_call(name)
         for child in n.children:
             _walk(child)
 
@@ -391,7 +621,7 @@ def _chunk_code_with_ast(
     repo_name: str,
     domain_context: str,
 ) -> list[Chunk]:
-    """Parse *source_code* with tree-sitter and return one Chunk per top-level entity."""
+    """Parse *source_code* with tree-sitter into granular method, class, and entity chunks."""
     language = get_language(lang_name)
     parser = get_parser(lang_name)
 
@@ -399,30 +629,107 @@ def _chunk_code_with_ast(
     tree = parser.parse(source_bytes)
 
     entity_types = ENTITY_NODE_TYPES.get(lang_name, set())
+    container_types = CONTAINER_NODE_TYPES.get(lang_name, set())
+    method_types = METHOD_NODE_TYPES.get(lang_name, set())
     doc_type = _classify_code_file(rel_path)
     chunks: list[Chunk] = []
 
-    def _walk(node):  # type: ignore[no-untyped-def]
-        if node.type in entity_types:
-            text = source_bytes[node.start_byte: node.end_byte].decode(
-                "utf-8", errors="replace"
-            )
-            name = _extract_entity_name(node, source_bytes, lang_name)
-            calls = _extract_calls(node, source_bytes)
-            chunks.append(
-                Chunk(
-                    repo_name=repo_name,
-                    domain_context=domain_context,
-                    document_type=doc_type,
-                    file_path=str(rel_path),
-                    entity_name=name,
-                    content=text,
-                    calls=calls,
+    def _process_container(c_node, container_name: str) -> None:
+        # 1. Walk body and extract granular method chunks
+        body_node = None
+        for child in c_node.children:
+            if child.type in ("block", "class_body", "declaration_list", "template_body"):
+                body_node = child
+                break
+        members = body_node.children if body_node else c_node.children
+        for member in members:
+            if member.type in method_types:
+                m_name = _extract_entity_name(member, source_bytes, lang_name)
+                q_name = f"{container_name}.{m_name}" if m_name != "<anonymous>" else container_name
+                m_text = source_bytes[member.start_byte: member.end_byte].decode("utf-8", errors="replace")
+                m_calls = _extract_calls(member, source_bytes)
+                chunks.append(
+                    Chunk(
+                        repo_name=repo_name,
+                        domain_context=domain_context,
+                        document_type=doc_type,
+                        file_path=str(rel_path),
+                        entity_name=q_name,
+                        content=m_text,
+                        calls=m_calls,
+                    )
                 )
+
+        # 2. Container chunk itself (concise interface outline if large, full text if small)
+        full_text = source_bytes[c_node.start_byte: c_node.end_byte].decode("utf-8", errors="replace")
+        if len(full_text) > 1500:
+            c_content = _build_container_outline(c_node, source_bytes, lang_name)
+        else:
+            c_content = full_text
+        c_calls = _extract_calls(c_node, source_bytes)
+        chunks.append(
+            Chunk(
+                repo_name=repo_name,
+                domain_context=domain_context,
+                document_type=doc_type,
+                file_path=str(rel_path),
+                entity_name=container_name,
+                content=c_content,
+                calls=c_calls,
             )
-            # Don't recurse into nested definitions — we already captured
-            # the outer entity. Nested helpers are included in the parent chunk.
+        )
+
+    def _process_top_level(node) -> None:
+        name = _extract_entity_name(node, source_bytes, lang_name)
+        text = source_bytes[node.start_byte: node.end_byte].decode("utf-8", errors="replace")
+        calls = _extract_calls(node, source_bytes)
+        chunks.append(
+            Chunk(
+                repo_name=repo_name,
+                domain_context=domain_context,
+                document_type=doc_type,
+                file_path=str(rel_path),
+                entity_name=name,
+                content=text,
+                calls=calls,
+            )
+        )
+
+    def _walk(node) -> None:
+        # Export statement (TypeScript / JavaScript)
+        if node.type == "export_statement":
+            for child in node.children:
+                if child.type in container_types:
+                    c_name = _extract_entity_name(child, source_bytes, lang_name)
+                    _process_container(child, c_name)
+                    return
+                elif child.type in entity_types:
+                    _process_top_level(child)
+                    return
             return
+
+        # Decorated definition (Python decorated class or function)
+        if node.type == "decorated_definition":
+            for child in node.children:
+                if child.type in container_types:
+                    c_name = _extract_entity_name(child, source_bytes, lang_name)
+                    _process_container(node, c_name)
+                    return
+                elif child.type in entity_types:
+                    _process_top_level(node)
+                    return
+
+        # Containers (Classes, interfaces, impls)
+        if node.type in container_types:
+            c_name = _extract_entity_name(node, source_bytes, lang_name)
+            _process_container(node, c_name)
+            return
+
+        # Standalone top-level entities
+        if node.type in entity_types:
+            _process_top_level(node)
+            return
+
         for child in node.children:
             _walk(child)
 
@@ -441,6 +748,8 @@ def _chunk_code_with_ast(
                 content=source_code,
             )
         )
+
+    return chunks
 
     return chunks
 
