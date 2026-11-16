@@ -774,6 +774,26 @@ def _auto_detect_commit_sha(target_dir: Path) -> str:
     return ""
 
 
+def _resolve_commit_sha(target_dir: Path, supplied: str, git_ref: str) -> str:
+    """Require a verifiable revision whenever ingestion advertises one."""
+    detected = _auto_detect_commit_sha(target_dir)
+    if supplied and not re.fullmatch(r"[a-f0-9]{40}", supplied):
+        raise ValueError("--commit-sha must be a full lowercase Git SHA")
+    if detected and supplied and supplied != detected:
+        raise ValueError("--commit-sha differs from the target checkout HEAD")
+    commit_sha = supplied or detected
+    if git_ref and not commit_sha:
+        raise ValueError("--git-ref requires a Git checkout or --commit-sha")
+    if detected:
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=str(target_dir), capture_output=True, text=True, timeout=10,
+        )
+        if status.returncode != 0 or status.stdout:
+            raise ValueError("Git checkout has tracked changes; index a clean revision")
+    return commit_sha
+
+
 def _apply_provenance(
     chunks: list[Chunk],
     *,
@@ -910,8 +930,8 @@ def main() -> None:
         logger.error("Target directory does not exist: %s", target)
         sys.exit(1)
 
-    # Resolve commit SHA: explicit flag > auto-detect from git
-    commit_sha = args.commit_sha or _auto_detect_commit_sha(target)
+    # A named ref without a pinned commit would admit stale results across runs.
+    commit_sha = _resolve_commit_sha(target, args.commit_sha, args.git_ref)
     if commit_sha:
         logger.info("Revision provenance: commit_sha=%s", commit_sha[:12])
     if args.git_ref:

@@ -7,6 +7,7 @@ Run with: ``make test``  (starts Qdrant via docker compose first).
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -22,10 +23,34 @@ from ingest import (
     _classify_code_file,
     _extract_calls,
     _is_test_file,
+    _resolve_commit_sha,
     ensure_collection,
     upsert_chunks,
     walk_repo,
 )
+
+
+def test_revision_provenance_requires_a_pinned_clean_snapshot(tmp_path: Path):
+    sha = "a" * 40
+    with pytest.raises(ValueError, match="requires a Git checkout"):
+        _resolve_commit_sha(tmp_path, "", "main")
+    assert _resolve_commit_sha(tmp_path, sha, "main") == sha
+    with pytest.raises(ValueError, match="full lowercase"):
+        _resolve_commit_sha(tmp_path, "abc", "main")
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    source = tmp_path / "source.py"
+    source.write_text("print('v1')\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "source.py"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=Test",
+                    "-c", "user.email=test@example.com", "commit", "-qm", "initial"], check=True)
+    head = subprocess.check_output(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True).strip()
+    assert _resolve_commit_sha(tmp_path, "", "main") == head
+    with pytest.raises(ValueError, match="differs"):
+        _resolve_commit_sha(tmp_path, sha, "main")
+    source.write_text("print('v2')\n")
+    with pytest.raises(ValueError, match="tracked changes"):
+        _resolve_commit_sha(tmp_path, head, "main")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

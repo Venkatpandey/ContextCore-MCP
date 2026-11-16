@@ -76,6 +76,13 @@ uv run python ingest.py /path/to/your/repo --repo-name my-service --domain-conte
 # 5. Connect your AI agent to http://localhost:8000/sse
 ```
 
+For revision-scoped agent searches, ingest a clean Git checkout. The indexer
+records its HEAD SHA. If you ingest a Git-free snapshot, supply its verified
+source commit explicitly with `--commit-sha FULL_40_CHARACTER_SHA --git-ref main`.
+The indexer rejects a named ref without a commit and a SHA that disagrees with
+a Git checkout. Pass that SHA as `target_revision` when searching; a branch name
+alone can point at different code after a merge.
+
 ## AI Agent Integrations
 
 ContextCore-MCP connects with any MCP-compatible AI agent or IDE over **SSE** (`http://localhost:8000/sse`) or **Stdio** (`uv run python server.py --transport stdio`).
