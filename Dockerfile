@@ -7,7 +7,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.6.5 /uv /uvx /bin/
 
 # Install system dependencies for tree-sitter C extensions and curl for health checks
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential curl && \
+    apt-get install -y --no-install-recommends build-essential curl git && \
     rm -rf /var/lib/apt/lists/*
 
 # Install project dependencies into the virtualenv using uv.lock

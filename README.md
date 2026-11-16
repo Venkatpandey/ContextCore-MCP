@@ -14,7 +14,7 @@
 
 ---
 
-A local and cloud-ready **RAG service** that ingests multi-repository source code and business documentation into a self-hosted **Qdrant** vector database, exposing five high-precision retrieval tools via **FastMCP** to supercharge AI coding agents across the entire Software Development Lifecycle (SDLC).
+A local and cloud-ready **RAG service** that ingests source code and business documentation into **Qdrant** and exposes focused retrieval tools through **FastMCP**.
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌──────────────────────┐
@@ -146,12 +146,20 @@ ContextCore-MCP integrates cleanly with autonomous agents like [**ProPR** (`inte
 uv run python ingest.py /path/to/target-repo --repo-name propr --domain-context agent-orchestration
 ```
 
-When an autonomous agent resolves an issue, it queries the 5 SDLC tools:
+When an autonomous agent resolves an issue, it queries the SDLC tools:
 - `get_epic_planning_context`: Queries PRDs and ADRs for architectural context, with automatic code ground-truth fallback when documentation is sparse or absent.
 - `get_implementation_ast`: Locates specific classes, functions, and interfaces.
 - `get_testing_context`: Retrieves matching test conventions and fixtures.
 - `get_code_review_guidelines`: Verifies proposed patches against repo rules.
 - `get_deployment_infrastructure`: Retrieves Dockerfiles and CI definitions.
+
+Search tools return up to five short previews with a Point ID. Call
+`get_chunk(point_id, repo_name, offset=0, max_chars=8000)` to read a relevant
+source chunk. For larger chunks, use the returned next offset to read another
+page. Specify `target_revision` when the index contains multiple revisions.
+Git repository ingestion reads tracked files; ordinary directories still use
+the directory walker. Rebuild an existing collection after updating to index
+`.mjs` runtime files without retaining stale points from earlier ingests.
 
 ---
 

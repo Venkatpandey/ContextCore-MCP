@@ -59,7 +59,10 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "contextcore_knowledge_base")
-TOP_K = 10
+TOP_K = 5
+PREVIEW_CHARS = 500
+PREVIEW_CALLS = 8
+MAX_CHUNK_CHARS = 16000
 
 # ---------------------------------------------------------------------------
 # Globals — initialised at module load (once per process)
@@ -241,32 +244,21 @@ def _search(
 ) -> list[dict[str, Any]]:
     """Run a Qdrant search with the supplied filter conditions and latency tracking.
 
-    When *target_revision* is set, an OR filter is appended so that results
-    match either ``git_ref`` or ``commit_sha``.  When *target_environment* is
+    When *target_revision* is set, a nested OR filter requires results to
+    match either ``git_ref`` or ``commit_sha``. When *target_environment* is
     set, results are restricted to that deployment tier.
     When the collection uses named vectors, *vector_name* specifies which vector
     index to search ('text' or 'code').
     """
     all_must = list(must_conditions)
 
-    # Revision scoping: match git_ref OR commit_sha
     if target_revision:
-        # We need a nested filter to express OR between two fields.
-        # Qdrant ``should`` at the top level is OR'd with ``must``, so
-        # we wrap the revision check as a nested must filter with should.
         all_must.append(
-            FieldCondition(key="git_ref", match=MatchValue(value=target_revision))
+            Filter(should=[
+                FieldCondition(key="git_ref", match=MatchValue(value=target_revision)),
+                FieldCondition(key="commit_sha", match=MatchValue(value=target_revision)),
+            ])
         )
-        # Also try matching by commit_sha — we add it as a should so
-        # *either* field can match.  However Qdrant's semantics require
-        # us to use should_conditions at the top-level for this OR.
-        revision_should = [
-            FieldCondition(key="git_ref", match=MatchValue(value=target_revision)),
-            FieldCondition(key="commit_sha", match=MatchValue(value=target_revision)),
-        ]
-        # Remove the must we just added and use should instead
-        all_must.pop()
-        should_conditions = (should_conditions or []) + revision_should
 
     if target_environment:
         all_must.append(
@@ -307,6 +299,7 @@ def _search(
 
     results = [
         {
+            "point_id": str(hit.id),
             "score": hit.score,
             "repo_name": hit.payload.get("repo_name"),
             "document_type": hit.payload.get("document_type"),
@@ -325,7 +318,7 @@ def _search(
 
 
 def _format_results(results: list[dict[str, Any]]) -> str:
-    """Format search results into a readable string for the LLM consumer."""
+    """Return bounded previews; agents can request a full chunk by point ID."""
     if not results:
         return "No relevant results found."
 
@@ -338,6 +331,8 @@ def _format_results(results: list[dict[str, Any]]) -> str:
             f"Type: {r['document_type']}\n"
             f"Repo: {r['repo_name']}\n"
         )
+        if r.get("point_id"):
+            header += f"Point ID: {r['point_id']}\n"
         # Provenance metadata (only rendered when present)
         commit_sha = r.get("commit_sha", "")
         git_ref = r.get("git_ref", "")
@@ -355,11 +350,67 @@ def _format_results(results: list[dict[str, Any]]) -> str:
         # Call-graph lineage
         calls = r.get("calls", [])
         if calls:
-            header += f"Calls: {', '.join(calls)}\n"
+            extra = len(calls) - PREVIEW_CALLS
+            shown = ", ".join(calls[:PREVIEW_CALLS])
+            if extra > 0:
+                shown += f" (+{extra} more)"
+            header += f"Calls: {shown}\n"
 
-        header += f"\n{r['content']}\n"
+        content = r.get("content") or ""
+        preview = content[:PREVIEW_CHARS]
+        if len(content) > PREVIEW_CHARS:
+            preview += "\n[Preview truncated; use get_chunk with this Point ID for more.]"
+        header += f"\n{preview}\n"
         parts.append(header)
     return "\n".join(parts)
+
+
+@mcp.tool()
+@track_tool("get_chunk")
+def get_chunk(
+    point_id: str,
+    repo_name: str,
+    offset: int = 0,
+    max_chars: int = 8000,
+    target_revision: str | None = None,
+) -> str:
+    """Read a search result in bounded pages by Point ID and repository.
+
+    Use this after a context search identifies a relevant source. Pass the
+    returned next offset to read more of a large chunk.
+    """
+    if offset < 0 or not 1 <= max_chars <= MAX_CHUNK_CHARS:
+        return f"Invalid range: offset must be nonnegative and max_chars 1–{MAX_CHUNK_CHARS}."
+    try:
+        points = _qdrant.retrieve(
+            collection_name=COLLECTION_NAME,
+            ids=[point_id],
+            with_payload=True,
+        )
+    except Exception as exc:
+        logger.warning("get_chunk retrieval failed: %s", exc)
+        return "Chunk not found."
+    if not points:
+        return "Chunk not found."
+    payload = points[0].payload or {}
+    if payload.get("repo_name") != repo_name:
+        return "Chunk not found."
+    if target_revision and target_revision not in (
+        payload.get("git_ref"), payload.get("commit_sha")
+    ):
+        return "Chunk not found at the requested revision."
+    content = payload.get("content") or ""
+    if offset > len(content):
+        return "Offset exceeds chunk length."
+    end = min(len(content), offset + max_chars)
+    header = (
+        f"File: {payload.get('file_path')}\n"
+        f"Entity: {payload.get('entity_name')}\n"
+        f"Commit: {payload.get('commit_sha', '')}\n"
+        f"Ref: {payload.get('git_ref', '')}\n"
+        f"Offset: {offset}; Next offset: {end}; Total chars: {len(content)}\n\n"
+    )
+    return header + content[offset:end]
 
 
 # ── Tool 1: Epic Planning ─────────────────────────────────────────────────
@@ -422,7 +473,7 @@ def get_epic_planning_context(
                 FieldCondition(key="repo_name", match=MatchValue(value=repo_name)),
                 FieldCondition(key="document_type", match=MatchValue(value="code")),
             ],
-            top_k=5,
+            top_k=3,
             score_threshold=0.25,
             tool_name="get_epic_planning_context_code_fallback",
             target_revision=target_revision,
@@ -535,68 +586,19 @@ def get_testing_context(
         vec = _embed(modified_code)
         using_vname = "text" if use_code_vector else None
 
-    # Build conditions
-    must_conds = [
-        FieldCondition(key="repo_name", match=MatchValue(value=repo_name)),
-    ]
-    should_conds: list[FieldCondition] = [
-        FieldCondition(key="document_type", match=MatchValue(value="test_code")),
-        FieldCondition(key="document_type", match=MatchValue(value="code")),
-    ]
-
-    if target_environment:
-        must_conds.append(
-            FieldCondition(key="environment", match=MatchValue(value=target_environment))
-        )
-
-    # For revision scoping we use the shared _search helper when there's a
-    # target_revision, otherwise fall back to the original inline query for
-    # backward compatibility with the should filter semantics.
-    if target_revision:
-        # Add revision should conditions
-        should_conds.extend([
-            FieldCondition(key="git_ref", match=MatchValue(value=target_revision)),
-            FieldCondition(key="commit_sha", match=MatchValue(value=target_revision)),
-        ])
-
-    query_kwargs: dict[str, Any] = {
-        "collection_name": COLLECTION_NAME,
-        "query": vec,
-        "query_filter": Filter(
-            must=must_conds,
-            should=should_conds,
-        ),
-        "limit": TOP_K,
-        "search_params": SearchParams(exact=False, hnsw_ef=128),
-        "with_payload": True,
-    }
-    if using_vname:
-        query_kwargs["using"] = using_vname
-
-    with QDRANT_QUERY_DURATION_SECONDS.labels(
-        tool_name="get_testing_context"
-    ).time():
-        response = _qdrant.query_points(**query_kwargs)
-
-    formatted = [
-        {
-            "score": hit.score,
-            "repo_name": hit.payload.get("repo_name"),
-            "document_type": hit.payload.get("document_type"),
-            "file_path": hit.payload.get("file_path"),
-            "entity_name": hit.payload.get("entity_name"),
-            "content": hit.payload.get("content"),
-            "commit_sha": hit.payload.get("commit_sha", ""),
-            "git_ref": hit.payload.get("git_ref", ""),
-            "environment": hit.payload.get("environment", ""),
-            "calls": hit.payload.get("calls", []),
-        }
-        for hit in response.points
-    ]
-    QDRANT_RESULTS_RETURNED.labels(tool_name="get_testing_context").observe(
-        len(formatted)
+    results = _search(
+        query_vector=vec,
+        must_conditions=[FieldCondition(key="repo_name", match=MatchValue(value=repo_name))],
+        should_conditions=[
+            FieldCondition(key="document_type", match=MatchValue(value="test_code")),
+            FieldCondition(key="document_type", match=MatchValue(value="code")),
+        ],
+        tool_name="get_testing_context",
+        target_revision=target_revision,
+        target_environment=target_environment,
+        vector_name=using_vname,
     )
-    return _format_results(formatted)
+    return _format_results(results)
 
 
 # ── Tool 4: Code Review Guidelines ────────────────────────────────────────
