@@ -122,8 +122,47 @@ export class Server {
         chunks = _chunk_code_with_ast(
             source, "typescript", Path("src/server.ts"), "test-repo", "general"
         )
-        # Should have at least 2 chunks (interface + class, via export_statement)
-        assert len(chunks) >= 2
+        names = {c.entity_name for c in chunks}
+        assert "Config" in names
+        assert "Server" in names
+        assert "Server.start" in names
+
+    def test_go_method_receiver_naming(self):
+        source = '''package main
+
+type Service struct{}
+
+func (s *Service) ProcessRefund(orderId string) bool {
+    return true
+}
+
+func StandaloneFunc() {}
+'''
+        chunks = _chunk_code_with_ast(
+            source, "go", Path("src/main.go"), "test-repo", "general"
+        )
+        names = {c.entity_name for c in chunks}
+        assert "Service.ProcessRefund" in names
+        assert "StandaloneFunc" in names
+
+    def test_large_class_outline_generation(self):
+        # Create a large class with many methods (>1500 chars)
+        methods = "\n".join(
+            f"    def method_{i}(self, arg: int) -> int:\n        '''Docstring for method {i}.'''\n        return arg * {i}\n"
+            for i in range(25)
+        )
+        source = f'class BigService:\n    """Big service docstring."""\n{methods}'
+        chunks = _chunk_code_with_ast(
+            source, "python", Path("src/big.py"), "test-repo", "general"
+        )
+        names = {c.entity_name for c in chunks}
+        assert "BigService" in names
+        assert "BigService.method_0" in names
+        assert "BigService.method_24" in names
+        big_chunk = next(c for c in chunks if c.entity_name == "BigService")
+        # Outline should summarize signatures with '...' rather than repeating all method bodies
+        assert "def method_0(self, arg: int) -> int: ..." in big_chunk.content
+        assert len(big_chunk.content) < len(source)
 
     def test_test_file_tagged_correctly(self):
         source = '''def test_something():
@@ -198,8 +237,13 @@ class TestCallGraphExtraction:
         chunks = _chunk_code_with_ast(
             source, "python", Path("src/handler.py"), "test-repo", "general"
         )
-        assert len(chunks) == 1
-        calls = chunks[0].calls
+        # Produces both granular method Handler.handle and class outline Handler
+        assert len(chunks) == 2
+        names = {c.entity_name for c in chunks}
+        assert "Handler" in names
+        assert "Handler.handle" in names
+        method_chunk = next(c for c in chunks if c.entity_name == "Handler.handle")
+        calls = method_chunk.calls
         assert any("validate" in c for c in calls)
         assert any("process" in c for c in calls)
         assert any("respond" in c for c in calls)

@@ -59,9 +59,9 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "contextcore_knowledge_base")
-TOP_K = 5
-PREVIEW_CHARS = 500
-PREVIEW_CALLS = 8
+TOP_K = int(os.getenv("DEFAULT_TOP_K", "3"))
+PREVIEW_CHARS = int(os.getenv("PREVIEW_CHARS", "2000"))
+PREVIEW_CALLS = int(os.getenv("PREVIEW_CALLS", "8"))
 MAX_CHUNK_CHARS = 16000
 
 # ---------------------------------------------------------------------------
@@ -317,8 +317,9 @@ def _search(
     return results
 
 
-def _format_results(results: list[dict[str, Any]]) -> str:
-    """Return bounded previews; agents can request a full chunk by point ID."""
+def _format_results(results: list[dict[str, Any]], preview_chars: int = PREVIEW_CHARS) -> str:
+    """Format search results. Complete entities under preview_chars are returned in full.
+    Oversized entities are bounded with reference to get_chunk."""
     if not results:
         return "No relevant results found."
 
@@ -357,9 +358,11 @@ def _format_results(results: list[dict[str, Any]]) -> str:
             header += f"Calls: {shown}\n"
 
         content = r.get("content") or ""
-        preview = content[:PREVIEW_CHARS]
-        if len(content) > PREVIEW_CHARS:
-            preview += "\n[Preview truncated; use get_chunk with this Point ID for more.]"
+        if len(content) > preview_chars:
+            preview = content[:preview_chars]
+            preview += f"\n[Preview truncated at {preview_chars}/{len(content)} chars; use get_chunk with Point ID '{r.get('point_id')}' for more.]"
+        else:
+            preview = content
         header += f"\n{preview}\n"
         parts.append(header)
     return "\n".join(parts)
@@ -424,6 +427,7 @@ def get_epic_planning_context(
     include_code_fallback: bool = True,
     target_revision: str | None = None,
     target_environment: str | None = None,
+    top_k: int = TOP_K,
 ) -> str:
     """Retrieve PRDs, architecture docs, and ADRs to help the planning agent
     break down an epic into issues.
@@ -441,14 +445,16 @@ def get_epic_planning_context(
             specific codebase snapshot.
         target_environment: Optional deployment tier to scope results
             (e.g. 'production', 'staging').
+        top_k: Number of top matching results to retrieve. Defaults to 3.
     """
     logger.info(
-        "get_epic_planning_context(topic=%r, repo=%r, code_fallback=%s, rev=%s, env=%s)",
+        "get_epic_planning_context(topic=%r, repo=%r, code_fallback=%s, rev=%s, env=%s, top_k=%d)",
         topic,
         repo_name,
         include_code_fallback,
         target_revision,
         target_environment,
+        top_k,
     )
     vec = _embed(topic)
     doc_results = _search(
@@ -459,6 +465,7 @@ def get_epic_planning_context(
                 key="document_type", match=MatchValue(value="business_logic")
             ),
         ],
+        top_k=top_k,
         score_threshold=0.25,
         tool_name="get_epic_planning_context",
         target_revision=target_revision,
@@ -473,7 +480,7 @@ def get_epic_planning_context(
                 FieldCondition(key="repo_name", match=MatchValue(value=repo_name)),
                 FieldCondition(key="document_type", match=MatchValue(value="code")),
             ],
-            top_k=3,
+            top_k=top_k,
             score_threshold=0.25,
             tool_name="get_epic_planning_context_code_fallback",
             target_revision=target_revision,
@@ -509,6 +516,7 @@ def get_implementation_ast(
     repo_name: str,
     target_revision: str | None = None,
     target_environment: str | None = None,
+    top_k: int = TOP_K,
 ) -> str:
     """Retrieve exact functions, classes, and interfaces needed for a coding
     agent to implement feature logic.
@@ -521,10 +529,11 @@ def get_implementation_ast(
             specific codebase snapshot.
         target_environment: Optional deployment tier to scope results
             (e.g. 'production', 'staging').
+        top_k: Number of top matching results to retrieve. Defaults to 3.
     """
     logger.info(
-        "get_implementation_ast(issue=%r, repo=%r, rev=%s, env=%s)",
-        issue_description, repo_name, target_revision, target_environment,
+        "get_implementation_ast(issue=%r, repo=%r, rev=%s, env=%s, top_k=%d)",
+        issue_description, repo_name, target_revision, target_environment, top_k,
     )
     # Check if dual embedding / named vector 'code' is available
     use_code_vector = _collection_uses_named_vectors(COLLECTION_NAME)
@@ -543,6 +552,7 @@ def get_implementation_ast(
             FieldCondition(key="repo_name", match=MatchValue(value=repo_name)),
             FieldCondition(key="document_type", match=MatchValue(value="code")),
         ],
+        top_k=top_k,
         tool_name="get_implementation_ast",
         target_revision=target_revision,
         target_environment=target_environment,
@@ -561,6 +571,7 @@ def get_testing_context(
     repo_name: str,
     target_revision: str | None = None,
     target_environment: str | None = None,
+    top_k: int = TOP_K,
 ) -> str:
     """Retrieve existing test patterns and the original unmodified source code
     so the testing agent can write coverage for the exact delta.
@@ -573,8 +584,9 @@ def get_testing_context(
             specific codebase snapshot.
         target_environment: Optional deployment tier to scope results
             (e.g. 'production', 'staging').
+        top_k: Number of top matching results to retrieve. Defaults to 3.
     """
-    logger.info("get_testing_context(repo=%r, rev=%s, env=%s)", repo_name, target_revision, target_environment)
+    logger.info("get_testing_context(repo=%r, rev=%s, env=%s, top_k=%d)", repo_name, target_revision, target_environment, top_k)
     # Check if dual embedding / named vector 'code' is available
     use_code_vector = _collection_uses_named_vectors(COLLECTION_NAME)
     code_vec = _embed_code(modified_code) if use_code_vector else None
@@ -593,6 +605,7 @@ def get_testing_context(
             FieldCondition(key="document_type", match=MatchValue(value="test_code")),
             FieldCondition(key="document_type", match=MatchValue(value="code")),
         ],
+        top_k=top_k,
         tool_name="get_testing_context",
         target_revision=target_revision,
         target_environment=target_environment,
@@ -611,6 +624,7 @@ def get_code_review_guidelines(
     repo_name: str,
     target_revision: str | None = None,
     target_environment: str | None = None,
+    top_k: int = TOP_K,
 ) -> str:
     """Retrieve team coding standards and past architectural decisions to
     enforce during automated PR reviews.
@@ -620,8 +634,9 @@ def get_code_review_guidelines(
         repo_name: The repository to scope the search to.
         target_revision: Optional git ref or commit SHA to scope results.
         target_environment: Optional deployment tier to scope results.
+        top_k: Number of top matching results to retrieve. Defaults to 3.
     """
-    logger.info("get_code_review_guidelines(repo=%r, rev=%s)", repo_name, target_revision)
+    logger.info("get_code_review_guidelines(repo=%r, rev=%s, top_k=%d)", repo_name, target_revision, top_k)
     vec = _embed(code_diff)
     results = _search(
         query_vector=vec,
@@ -631,6 +646,7 @@ def get_code_review_guidelines(
                 key="document_type", match=MatchValue(value="business_logic")
             ),
         ],
+        top_k=top_k,
         tool_name="get_code_review_guidelines",
         target_revision=target_revision,
         target_environment=target_environment,
@@ -648,6 +664,7 @@ def get_deployment_infrastructure(
     repo_name: str,
     target_revision: str | None = None,
     target_environment: str | None = None,
+    top_k: int = TOP_K,
 ) -> str:
     """Retrieve Dockerfiles, CI/CD yamls, and Terraform snippets for the
     deployment agent.
@@ -657,13 +674,15 @@ def get_deployment_infrastructure(
         repo_name: The repository to scope the search to.
         target_revision: Optional git ref or commit SHA to scope results.
         target_environment: Optional deployment tier to scope results.
+        top_k: Number of top matching results to retrieve. Defaults to 3.
     """
     logger.info(
-        "get_deployment_infrastructure(service=%r, repo=%r, rev=%s, env=%s)",
+        "get_deployment_infrastructure(service=%r, repo=%r, rev=%s, env=%s, top_k=%d)",
         target_service,
         repo_name,
         target_revision,
         target_environment,
+        top_k,
     )
     vec = _embed(target_service)
     results = _search(
@@ -674,6 +693,7 @@ def get_deployment_infrastructure(
                 key="document_type", match=MatchValue(value="infrastructure")
             ),
         ],
+        top_k=top_k,
         tool_name="get_deployment_infrastructure",
         target_revision=target_revision,
         target_environment=target_environment,
@@ -741,6 +761,33 @@ def get_call_path(
                 with_payload=True,
             )
         entity_points = entity_response[0]
+        # If not found by exact name and entity_name is unqualified (no dot),
+        # look for qualified entities ending with f".{entity_name}"
+        if not entity_points and "." not in entity_name:
+            repo_must: list[Any] = [
+                FieldCondition(key="repo_name", match=MatchValue(value=repo_name))
+            ]
+            if target_environment:
+                repo_must.append(
+                    FieldCondition(key="environment", match=MatchValue(value=target_environment))
+                )
+            repo_filter_kwargs: dict[str, Any] = {"must": repo_must}
+            if target_revision:
+                repo_filter_kwargs["should"] = [
+                    FieldCondition(key="git_ref", match=MatchValue(value=target_revision)),
+                    FieldCondition(key="commit_sha", match=MatchValue(value=target_revision)),
+                ]
+            candidate_resp = _qdrant.scroll(
+                collection_name=COLLECTION_NAME,
+                scroll_filter=Filter(**repo_filter_kwargs),
+                limit=100,
+                with_payload=True,
+            )
+            entity_points = [
+                pt
+                for pt in candidate_resp[0]
+                if (pt.payload or {}).get("entity_name", "").endswith(f".{entity_name}")
+            ]
     except Exception as exc:
         logger.warning("get_call_path: entity lookup failed: %s", exc)
         entity_points = []
@@ -786,21 +833,32 @@ def get_call_path(
         parts.append("")
 
     # ── 2. Find callers — entities whose calls list contains entity_name ──
-    caller_must = [
-        FieldCondition(key="repo_name", match=MatchValue(value=repo_name)),
-        FieldCondition(key="calls", match=MatchValue(value=entity_name)),
-    ]
+    caller_must = [FieldCondition(key="repo_name", match=MatchValue(value=repo_name))]
     if target_environment:
         caller_must.append(
             FieldCondition(key="environment", match=MatchValue(value=target_environment))
         )
-
-    caller_filter: dict[str, Any] = {"must": caller_must}
     if target_revision:
-        caller_filter["should"] = [
-            FieldCondition(key="git_ref", match=MatchValue(value=target_revision)),
-            FieldCondition(key="commit_sha", match=MatchValue(value=target_revision)),
-        ]
+        caller_must.append(
+            Filter(
+                should=[
+                    FieldCondition(key="git_ref", match=MatchValue(value=target_revision)),
+                    FieldCondition(key="commit_sha", match=MatchValue(value=target_revision)),
+                ]
+            )
+        )
+
+    caller_calls_conditions = [
+        FieldCondition(key="calls", match=MatchValue(value=entity_name)),
+    ]
+    if "." in entity_name:
+        leaf = entity_name.split(".")[-1]
+        caller_calls_conditions.append(
+            FieldCondition(key="calls", match=MatchValue(value=leaf))
+        )
+
+    caller_must.append(Filter(should=caller_calls_conditions))
+    caller_filter: dict[str, Any] = {"must": caller_must}
 
     try:
         caller_response = _qdrant.scroll(
