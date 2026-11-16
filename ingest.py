@@ -77,6 +77,11 @@ TS_LANGUAGE_MAP: dict[str, str] = {
     ".tsx": "tsx",
     ".js": "javascript",
     ".jsx": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".mts": "typescript",
+    ".cts": "typescript",
+    ".sh": "bash",
     ".go": "go",
     ".rs": "rust",
     ".java": "java",
@@ -89,6 +94,7 @@ TS_LANGUAGE_MAP: dict[str, str] = {
 # Tree-sitter node types considered "top-level entities" per language.
 # Expand as needed.
 ENTITY_NODE_TYPES: dict[str, set[str]] = {
+    "bash": {"function_definition"},
     "python": {
         "function_definition",
         "class_definition",
@@ -292,7 +298,9 @@ def _extract_entity_name(node, source_bytes: bytes, lang: str) -> str:
     """Best-effort extraction of the entity name from a tree-sitter node."""
     # Most languages have a `name` child of type `identifier`
     for child in node.children:
-        if child.type in ("identifier", "type_identifier", "property_identifier"):
+        if child.type in ("identifier", "type_identifier", "property_identifier") or (
+            lang == "bash" and child.type == "word"
+        ):
             return source_bytes[child.start_byte: child.end_byte].decode(
                 "utf-8", errors="replace"
             )
@@ -560,42 +568,62 @@ def walk_repo(
     domain_context: str,
 ) -> Generator[Chunk, None, None]:
     """Yield Chunk objects for every parseable file under *root*."""
+    for fpath in _repo_files(root):
+        rel_path = fpath.relative_to(root)
+        suffix = fpath.suffix.lower()
+        if suffix not in TS_LANGUAGE_MAP and suffix != ".md" and not _is_infra_file(rel_path):
+            continue
+
+        try:
+            text = fpath.read_text(encoding="utf-8", errors="replace")
+        except (OSError, PermissionError) as exc:
+            logger.warning("Skipping %s: %s", fpath, exc)
+            continue
+
+        if not text.strip():
+            continue
+
+        if suffix in TS_LANGUAGE_MAP:
+            lang = TS_LANGUAGE_MAP[suffix]
+            yield from _chunk_code_with_ast(
+                text, lang, rel_path, repo_name, domain_context
+            )
+        elif suffix == ".md":
+            yield from _chunk_markdown(text, rel_path, repo_name, domain_context)
+        elif _is_infra_file(rel_path):
+            yield from _chunk_infra_file(text, rel_path, repo_name, domain_context)
+
+
+def _repo_files(root: Path) -> Generator[Path, None, None]:
+    """Use tracked files in Git repositories; walk ordinary directories."""
+    try:
+        tracked = subprocess.run(
+            ["git", "ls-files", "--cached", "-z"],
+            cwd=root,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        tracked = None
+
+    if (root / ".git").exists() and (tracked is None or tracked.returncode != 0):
+        raise RuntimeError(f"Cannot list tracked files in Git repository: {root}")
+
+    if tracked is not None and tracked.returncode == 0:
+        for name in tracked.stdout.split(b"\0"):
+            if name:
+                path = root / os.fsdecode(name)
+                if path.is_file() and not path.is_symlink():
+                    yield path
+        return
+
     for dirpath, dirnames, filenames in os.walk(root):
-        # Prune skipped directories in-place
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-
-        for fname in filenames:
-            fpath = Path(dirpath) / fname
-            rel_path = fpath.relative_to(root)
-            suffix = fpath.suffix.lower()
-
-            try:
-                text = fpath.read_text(encoding="utf-8", errors="replace")
-            except (OSError, PermissionError) as exc:
-                logger.warning("Skipping %s: %s", fpath, exc)
-                continue
-
-            if not text.strip():
-                continue
-
-            # 1️⃣  Source code → AST chunking
-            if suffix in TS_LANGUAGE_MAP:
-                lang = TS_LANGUAGE_MAP[suffix]
-                yield from _chunk_code_with_ast(
-                    text, lang, rel_path, repo_name, domain_context
-                )
-
-            # 2️⃣  Markdown → header-based chunking
-            elif suffix == ".md":
-                yield from _chunk_markdown(
-                    text, rel_path, repo_name, domain_context
-                )
-
-            # 3️⃣  Infrastructure files → whole-file chunking
-            elif _is_infra_file(rel_path):
-                yield from _chunk_infra_file(
-                    text, rel_path, repo_name, domain_context
-                )
+        for name in filenames:
+            path = Path(dirpath) / name
+            if path.is_file() and not path.is_symlink():
+                yield path
 
 
 # ---------------------------------------------------------------------------
@@ -746,6 +774,26 @@ def _auto_detect_commit_sha(target_dir: Path) -> str:
     return ""
 
 
+def _resolve_commit_sha(target_dir: Path, supplied: str, git_ref: str) -> str:
+    """Require a verifiable revision whenever ingestion advertises one."""
+    detected = _auto_detect_commit_sha(target_dir)
+    if supplied and not re.fullmatch(r"[a-f0-9]{40}", supplied):
+        raise ValueError("--commit-sha must be a full lowercase Git SHA")
+    if detected and supplied and supplied != detected:
+        raise ValueError("--commit-sha differs from the target checkout HEAD")
+    commit_sha = supplied or detected
+    if git_ref and not commit_sha:
+        raise ValueError("--git-ref requires a Git checkout or --commit-sha")
+    if detected:
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=str(target_dir), capture_output=True, text=True, timeout=10,
+        )
+        if status.returncode != 0 or status.stdout:
+            raise ValueError("Git checkout has tracked changes; index a clean revision")
+    return commit_sha
+
+
 def _apply_provenance(
     chunks: list[Chunk],
     *,
@@ -882,8 +930,8 @@ def main() -> None:
         logger.error("Target directory does not exist: %s", target)
         sys.exit(1)
 
-    # Resolve commit SHA: explicit flag > auto-detect from git
-    commit_sha = args.commit_sha or _auto_detect_commit_sha(target)
+    # A named ref without a pinned commit would admit stale results across runs.
+    commit_sha = _resolve_commit_sha(target, args.commit_sha, args.git_ref)
     if commit_sha:
         logger.info("Revision provenance: commit_sha=%s", commit_sha[:12])
     if args.git_ref:

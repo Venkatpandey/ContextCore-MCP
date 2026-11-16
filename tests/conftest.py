@@ -7,14 +7,15 @@ Requires a running Qdrant instance on localhost:6333 (started via ``make up``).
 from __future__ import annotations
 
 import time
+import os
 from pathlib import Path
 
 import pytest
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 
-QDRANT_HOST = "localhost"
-QDRANT_PORT = 6333
+QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
+QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
 TEST_COLLECTION = "contextcore_knowledge_base"
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 

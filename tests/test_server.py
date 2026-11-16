@@ -28,6 +28,7 @@ from server import (
     _embed,
     _search,
     _format_results,
+    get_chunk,
     get_epic_planning_context,
     get_implementation_ast,
     get_testing_context,
@@ -212,6 +213,39 @@ class TestServerTools:
         assert "Ref:" not in out
         assert "Calls:" not in out
 
+    def test_format_results_returns_bounded_preview(self):
+        out = _format_results([{
+            "score": 0.9,
+            "repo_name": "r",
+            "document_type": "code",
+            "file_path": "a.py",
+            "entity_name": "foo",
+            "point_id": "point-1",
+            "content": "x" * 2000,
+            "calls": [f"call{i}" for i in range(20)],
+        }])
+        assert "Point ID: point-1" in out
+        assert "x" * 500 in out
+        assert "x" * 501 not in out
+        assert "get_chunk" in out
+        assert "call7 (+12 more)" in out
+        assert "call8" not in out
+
+    def test_get_chunk_reads_pages_with_repo_scope(self):
+        results = _search(
+            query_vector=_embed("authentication login"),
+            must_conditions=[
+                FieldCondition(key="repo_name", match=MatchValue(value=self.REPO_NAME)),
+                FieldCondition(key="document_type", match=MatchValue(value="code")),
+            ],
+        )
+        point_id = results[0]["point_id"]
+        assert "Chunk not found" in get_chunk(point_id, "another-repo")
+        first = get_chunk(point_id, self.REPO_NAME, max_chars=20)
+        assert "Next offset: 20" in first
+        assert "Offset: 20" in get_chunk(point_id, self.REPO_NAME, offset=20, max_chars=20)
+        assert "Offset exceeds chunk length" in get_chunk(point_id, self.REPO_NAME, offset=100000)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Integration: Revision-scoped tool queries
@@ -310,6 +344,22 @@ class TestRevisionScopedTools:
                 r.get("commit_sha") == "aaaa1111" or r.get("git_ref") == "aaaa1111"
                 for r in results
             )
+
+    def test_testing_context_requires_type_and_revision(self):
+        results = _search(
+            query_vector=_embed("authentication login"),
+            must_conditions=[FieldCondition(key="repo_name", match=MatchValue(value=self.REPO_NAME))],
+            should_conditions=[
+                FieldCondition(key="document_type", match=MatchValue(value="test_code")),
+                FieldCondition(key="document_type", match=MatchValue(value="code")),
+            ],
+            target_revision="v1.0.0",
+        )
+        assert results
+        assert all(r["git_ref"] == "v1.0.0" for r in results)
+        assert all(r["document_type"] in {"test_code", "code"} for r in results)
+        output = get_testing_context("authentication login", self.REPO_NAME, target_revision="v1.0.0")
+        assert "Ref: v2.0.0" not in output
 
 
 # ═══════════════════════════════════════════════════════════════════════════

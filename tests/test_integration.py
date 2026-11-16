@@ -6,6 +6,8 @@ Run with: ``make test``  (starts Qdrant via docker compose first).
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -21,10 +23,34 @@ from ingest import (
     _classify_code_file,
     _extract_calls,
     _is_test_file,
+    _resolve_commit_sha,
     ensure_collection,
     upsert_chunks,
     walk_repo,
 )
+
+
+def test_revision_provenance_requires_a_pinned_clean_snapshot(tmp_path: Path):
+    sha = "a" * 40
+    with pytest.raises(ValueError, match="requires a Git checkout"):
+        _resolve_commit_sha(tmp_path, "", "main")
+    assert _resolve_commit_sha(tmp_path, sha, "main") == sha
+    with pytest.raises(ValueError, match="full lowercase"):
+        _resolve_commit_sha(tmp_path, "abc", "main")
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    source = tmp_path / "source.py"
+    source.write_text("print('v1')\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "source.py"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=Test",
+                    "-c", "user.email=test@example.com", "commit", "-qm", "initial"], check=True)
+    head = subprocess.check_output(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True).strip()
+    assert _resolve_commit_sha(tmp_path, "", "main") == head
+    with pytest.raises(ValueError, match="differs"):
+        _resolve_commit_sha(tmp_path, sha, "main")
+    source.write_text("print('v2')\n")
+    with pytest.raises(ValueError, match="tracked changes"):
+        _resolve_commit_sha(tmp_path, head, "main")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -401,6 +427,28 @@ class TestIngestionIntegration:
         assert "test_code" in types, f"Missing 'test_code' — got {types}"
         assert "business_logic" in types, f"Missing 'business_logic' — got {types}"
         assert "infrastructure" in types, f"Missing 'infrastructure' — got {types}"
+
+    def test_walk_repo_parses_mjs(self, tmp_path: Path):
+        source = tmp_path / "repair-context.mjs"
+        source.write_text("export function selectRepairContext() { return true; }\n")
+        chunks = list(walk_repo(tmp_path, self.REPO_NAME, "agents"))
+        assert any(c.file_path == source.name and "selectRepairContext" in c.content for c in chunks)
+
+    def test_walk_repo_indexes_shell_script(self, tmp_path: Path):
+        source = tmp_path / "check-branch-name.sh"
+        source.write_text("#!/bin/sh\n# Validate a branch name\ngrep -qE '^(feat|fix)/'\n")
+        chunks = list(walk_repo(tmp_path, self.REPO_NAME, "agents"))
+        assert any(c.file_path == source.name and c.document_type == "code" for c in chunks)
+
+    def test_walk_repo_uses_tracked_files_in_git(self, tmp_path: Path):
+        import subprocess
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / "tracked.py").write_text("def tracked(): pass\n")
+        (tmp_path / "untracked.py").write_text("def untracked(): pass\n")
+        subprocess.run(["git", "add", "tracked.py"], cwd=tmp_path, check=True)
+        chunks = list(walk_repo(tmp_path, self.REPO_NAME, "agents"))
+        assert {c.file_path for c in chunks} == {"tracked.py"}
 
     def test_upsert_and_search(
         self,
@@ -808,7 +856,12 @@ class TestGrpcIntegration:
     @pytest.fixture
     def grpc_client(self) -> QdrantClient:
         """Create a live Qdrant client explicitly using gRPC transport."""
-        client = QdrantClient(host="localhost", port=6333, grpc_port=6334, prefer_grpc=True)
+        client = QdrantClient(
+            host=os.getenv("QDRANT_HOST", "localhost"),
+            port=int(os.getenv("QDRANT_PORT", "6333")),
+            grpc_port=int(os.getenv("QDRANT_GRPC_PORT", "6334")),
+            prefer_grpc=True,
+        )
         try:
             client.delete_collection(self.GRPC_COLLECTION)
         except Exception:
@@ -942,4 +995,3 @@ class TestDualEmbeddingIntegration:
         ).points
         assert len(code_results) > 0
         assert any("auth" in r.payload["file_path"].lower() for r in code_results)
-
